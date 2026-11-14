@@ -3,6 +3,7 @@ mod capture;
 mod gui;
 mod history;
 mod hotkey;
+mod icons;
 mod monitor_util;
 mod recorder;
 mod util;

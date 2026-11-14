@@ -1,31 +1,49 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::{Color32, CornerRadius, Margin, RichText, Stroke, Vec2};
+use egui::{
+    pos2, vec2, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Margin, Rect, RichText,
+    Sense, Stroke, StrokeKind, Vec2,
+};
 
 use windows_capture::monitor::Monitor;
 use windows_capture::window::Window;
 
 use crate::history::{self, HistoryEntry};
 use crate::hotkey::{HotkeyAction, HotkeyListener};
+use crate::icons::{self, Icon};
 use crate::monitor_util::{self, MonitorBounds};
 use crate::recorder::{self, ActiveRecording, CaptureTarget, Codec, RecordingOptions, Region};
 use crate::util;
 use crate::webcam::{self as camera, Corner, WebcamOptions};
 
-const BG: Color32 = Color32::from_rgb(14, 15, 20);
-const CARD: Color32 = Color32::from_rgb(24, 26, 34);
-const CARD_HI: Color32 = Color32::from_rgb(31, 34, 44);
-const BORDER: Color32 = Color32::from_rgb(45, 49, 62);
-const TEXT: Color32 = Color32::from_rgb(228, 232, 240);
-const MUTED: Color32 = Color32::from_rgb(148, 160, 178);
-const ACCENT: Color32 = Color32::from_rgb(99, 102, 241);
-const ACCENT_HI: Color32 = Color32::from_rgb(129, 140, 248);
-const DANGER: Color32 = Color32::from_rgb(239, 68, 68);
-const SUCCESS: Color32 = Color32::from_rgb(52, 211, 153);
-const CAUTION: Color32 = Color32::from_rgb(251, 191, 36);
+const BG: Color32 = Color32::from_rgb(10, 12, 16);
+const PANEL_TOP: Color32 = Color32::from_rgb(15, 18, 24);
+const SURFACE: Color32 = Color32::from_rgb(20, 23, 30);
+const SURFACE_ELEVATED: Color32 = Color32::from_rgb(25, 29, 38);
+const SURFACE_HOVER: Color32 = Color32::from_rgb(30, 35, 45);
+const SURFACE_ACTIVE: Color32 = Color32::from_rgb(34, 40, 52);
+const INPUT_BG: Color32 = Color32::from_rgb(13, 16, 21);
+const BORDER: Color32 = Color32::from_rgb(38, 44, 56);
+const BORDER_SOFT: Color32 = Color32::from_rgb(31, 36, 46);
+const BORDER_HI: Color32 = Color32::from_rgb(58, 67, 84);
+const TEXT: Color32 = Color32::from_rgb(236, 239, 245);
+const TEXT_SOFT: Color32 = Color32::from_rgb(197, 204, 216);
+const MUTED: Color32 = Color32::from_rgb(145, 155, 173);
+const MUTED_DIM: Color32 = Color32::from_rgb(105, 114, 131);
+const ACCENT: Color32 = Color32::from_rgb(79, 124, 255);
+const ACCENT_HI: Color32 = Color32::from_rgb(112, 150, 255);
+const ACCENT_SOFT: Color32 = Color32::from_rgb(25, 39, 76);
+const DANGER: Color32 = Color32::from_rgb(229, 72, 77);
+const DANGER_HI: Color32 = Color32::from_rgb(244, 92, 96);
+const DANGER_SOFT: Color32 = Color32::from_rgb(54, 25, 29);
+const DANGER_BORDER: Color32 = Color32::from_rgb(105, 42, 47);
+const SUCCESS: Color32 = Color32::from_rgb(63, 201, 110);
+const SUCCESS_SOFT: Color32 = Color32::from_rgb(21, 47, 31);
+const CAUTION: Color32 = Color32::from_rgb(240, 184, 76);
+const CAUTION_SOFT: Color32 = Color32::from_rgb(52, 40, 20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetMode {
@@ -42,7 +60,12 @@ enum Quality {
 }
 
 impl Quality {
-    const ALL: [Quality; 4] = [Quality::Low, Quality::Balanced, Quality::High, Quality::Ultra];
+    const ALL: [Quality; 4] = [
+        Quality::Low,
+        Quality::Balanced,
+        Quality::High,
+        Quality::Ultra,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -76,10 +99,7 @@ struct WindowInfo {
 
 enum Task {
     Idle,
-    Countdown {
-        secs_left: u8,
-        deadline: Instant,
-    },
+    Countdown { secs_left: u8, deadline: Instant },
     Starting(Receiver<Result<ActiveRecording, String>>),
     Stopping(Receiver<Result<PathBuf, String>>),
     PickingFolder(Receiver<Option<PathBuf>>),
@@ -197,12 +217,14 @@ pub struct App {
     task: Task,
     error: Option<String>,
     last_saved: Option<PathBuf>,
+    last_saved_at: Option<Instant>,
 
     fps_mark: Instant,
     fps_frames: u64,
     display_fps: f32,
     started_at: Option<Instant>,
 
+    logo_texture: egui::TextureHandle,
     _hotkey_listener: Option<HotkeyListener>,
     hotkey_rx: Option<Receiver<HotkeyAction>>,
 }
@@ -211,6 +233,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_style(&cc.egui_ctx);
         let prefs = load_prefs();
+        let logo_texture = load_logo_texture(&cc.egui_ctx);
 
         let (hotkey_listener, hotkey_rx) = if prefs.hotkeys_enabled {
             let (listener, rx) = HotkeyListener::new();
@@ -236,7 +259,11 @@ impl App {
                 3 => Quality::Ultra,
                 _ => Quality::Balanced,
             },
-            codec: if prefs.codec == 1 { Codec::Hevc } else { Codec::H264 },
+            codec: if prefs.codec == 1 {
+                Codec::Hevc
+            } else {
+                Codec::H264
+            },
             system_audio: prefs.system_audio,
             microphone: prefs.microphone,
             capture_cursor: prefs.capture_cursor,
@@ -269,10 +296,12 @@ impl App {
             task: Task::Idle,
             error: None,
             last_saved: None,
+            last_saved_at: None,
             fps_mark: Instant::now(),
             fps_frames: 0,
             display_fps: 0.0,
             started_at: None,
+            logo_texture,
             _hotkey_listener: hotkey_listener,
             hotkey_rx,
         };
@@ -370,10 +399,14 @@ impl App {
                 width: self.region_width,
                 height: self.region_height,
             };
-            Some(region.normalized(target.width(), target.height()).ok_or_else(|| {
-                "The selected region is invalid. Pick a region or use the full display."
-                    .to_string()
-            })?)
+            Some(
+                region
+                    .normalized(target.width(), target.height())
+                    .ok_or_else(|| {
+                        "The selected region is invalid. Pick a region or use the full display."
+                            .to_string()
+                    })?,
+            )
         } else {
             None
         };
@@ -425,6 +458,9 @@ impl App {
     }
 
     fn request_start(&mut self) {
+        self.error = None;
+        self.last_saved = None;
+        self.last_saved_at = None;
         if self.countdown_secs > 0 {
             self.task = Task::Countdown {
                 secs_left: self.countdown_secs,
@@ -476,7 +512,10 @@ impl App {
     }
 
     fn take_screenshot(&mut self) {
-        if matches!(self.task, Task::Starting(_) | Task::Stopping(_) | Task::PickingFolder(_)) {
+        if matches!(
+            self.task,
+            Task::Starting(_) | Task::Stopping(_) | Task::PickingFolder(_) | Task::Screenshot(_)
+        ) {
             return;
         }
         let Some(target) = self.current_target() else {
@@ -503,12 +542,16 @@ impl App {
         }
         let path = util::timestamped_path(&dir, "png");
 
+        self.error = None;
+        self.last_saved = None;
+        self.last_saved_at = None;
+
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("screenrec-screenshot".to_string())
             .spawn(move || {
-                let result = recorder::screenshot(target, region, path)
-                    .map_err(|err| format!("{err:#}"));
+                let result =
+                    recorder::screenshot(target, region, path).map_err(|err| format!("{err:#}"));
                 let _ = tx.send(result);
             })
             .ok();
@@ -634,10 +677,18 @@ impl App {
                         let nx2 = (rect.max.x - screen.min.x) / screen.width();
                         let ny2 = (rect.max.y - screen.min.y) / screen.height();
                         let region = Region {
-                            x: (nx * picker.monitor.width as f32).round().clamp(0.0, picker.monitor.width as f32) as u32,
-                            y: (ny * picker.monitor.height as f32).round().clamp(0.0, picker.monitor.height as f32) as u32,
-                            width: ((nx2 - nx) * picker.monitor.width as f32).round().max(2.0) as u32,
-                            height: ((ny2 - ny) * picker.monitor.height as f32).round().max(2.0) as u32,
+                            x: (nx * picker.monitor.width as f32)
+                                .round()
+                                .clamp(0.0, picker.monitor.width as f32)
+                                as u32,
+                            y: (ny * picker.monitor.height as f32)
+                                .round()
+                                .clamp(0.0, picker.monitor.height as f32)
+                                as u32,
+                            width: ((nx2 - nx) * picker.monitor.width as f32).round().max(2.0)
+                                as u32,
+                            height: ((ny2 - ny) * picker.monitor.height as f32).round().max(2.0)
+                                as u32,
                         };
                         picker.result = Some(
                             region
@@ -653,7 +704,6 @@ impl App {
                 finished = true;
             }
 
-            // Dim everything except the current selection so the desktop stays visible.
             let selection = match (picker.start, picker.current) {
                 (Some(a), Some(b)) => {
                     let r = egui::Rect::from_two_pos(a, b);
@@ -710,7 +760,11 @@ impl App {
                     painter.text(
                         egui::pos2(sel.min.x + 6.0, sel.min.y + 6.0),
                         egui::Align2::LEFT_TOP,
-                        format!("{} x {}", sel.width().round() as i32, sel.height().round() as i32),
+                        format!(
+                            "{} x {}",
+                            sel.width().round() as i32,
+                            sel.height().round() as i32
+                        ),
                         egui::FontId::monospace(13.0),
                         Color32::WHITE,
                     );
@@ -753,7 +807,6 @@ impl App {
     }
 
     fn poll_tasks(&mut self, ctx: &egui::Context) {
-        // Start / stop the global hotkey listener when the preference changes.
         if self.hotkeys_enabled && self.hotkey_rx.is_none() {
             let (listener, rx) = HotkeyListener::new();
             self._hotkey_listener = Some(listener);
@@ -763,7 +816,6 @@ impl App {
             self._hotkey_listener = None;
         }
 
-        // Poll global hotkeys if enabled
         let hotkey_actions: Vec<HotkeyAction> = if self.hotkeys_enabled {
             if let Some(rx) = &self.hotkey_rx {
                 let mut list = Vec::new();
@@ -804,7 +856,6 @@ impl App {
             }
         }
 
-        // Auto-stop when the configured recording limit is reached.
         if self.max_duration_secs > 0 && !matches!(self.task, Task::Stopping(_)) {
             let reached = self
                 .recording
@@ -818,7 +869,10 @@ impl App {
         let current = std::mem::replace(&mut self.task, Task::Idle);
 
         match current {
-            Task::Countdown { mut secs_left, deadline } => {
+            Task::Countdown {
+                mut secs_left,
+                deadline,
+            } => {
                 if Instant::now() >= deadline {
                     secs_left = secs_left.saturating_sub(1);
                     if secs_left == 0 {
@@ -831,7 +885,10 @@ impl App {
                         };
                     }
                 } else {
-                    self.task = Task::Countdown { secs_left, deadline };
+                    self.task = Task::Countdown {
+                        secs_left,
+                        deadline,
+                    };
                 }
             }
             Task::Starting(rx) => match rx.try_recv() {
@@ -855,9 +912,12 @@ impl App {
             Task::Stopping(rx) => match rx.try_recv() {
                 Ok(Ok(path)) => {
                     let duration = self.pending_duration.take().unwrap_or(0.0);
-                    self.history =
-                        history::add(self.history.clone(), HistoryEntry::new(&path, "video", duration));
+                    self.history = history::add(
+                        self.history.clone(),
+                        HistoryEntry::new(&path, "video", duration),
+                    );
                     self.last_saved = Some(path);
+                    self.last_saved_at = Some(Instant::now());
                     self.started_at = None;
 
                     if self.minimize_on_record {
@@ -894,8 +954,11 @@ impl App {
                 Ok(Ok(path)) => {
                     self.last_screenshot = Some(path.clone());
                     self.last_saved = Some(path.clone());
-                    self.history =
-                        history::add(self.history.clone(), HistoryEntry::new(&path, "screenshot", 0.0));
+                    self.last_saved_at = Some(Instant::now());
+                    self.history = history::add(
+                        self.history.clone(),
+                        HistoryEntry::new(&path, "screenshot", 0.0),
+                    );
                 }
                 Ok(Err(err)) => self.error = Some(format!("Screenshot failed: {err}")),
                 Err(TryRecvError::Empty) => self.task = Task::Screenshot(rx),
@@ -952,7 +1015,11 @@ impl App {
             minimize_on_record: self.minimize_on_record,
             hotkeys_enabled: self.hotkeys_enabled,
             output_dir: self.output_dir.clone(),
-            target_mode: if self.mode == TargetMode::Window { 1 } else { 0 },
+            target_mode: if self.mode == TargetMode::Window {
+                1
+            } else {
+                0
+            },
             monitor_index: self.selected_monitor,
             region_enabled: self.region_enabled,
             region_x: self.region_x,
@@ -996,163 +1063,254 @@ impl App {
         }
     }
 
+    fn output_dimensions(&self) -> (u32, u32) {
+        if self.mode == TargetMode::Monitor
+            && self.region_enabled
+            && self.region_width > 1
+            && self.region_height > 1
+        {
+            return (self.region_width, self.region_height);
+        }
+
+        let (w, h) = match self.mode {
+            TargetMode::Monitor => self.monitors.get(self.selected_monitor).map(|m| {
+                (
+                    m.handle.width().unwrap_or(0),
+                    m.handle.height().unwrap_or(0),
+                )
+            }),
+            TargetMode::Window => self.windows.get(self.selected_window).map(|w| {
+                (
+                    w.handle.width().unwrap_or(0).max(0) as u32,
+                    w.handle.height().unwrap_or(0).max(0) as u32,
+                )
+            }),
+        }
+        .unwrap_or((0, 0));
+
+        if w == 0 || h == 0 {
+            (1920, 1080)
+        } else {
+            (w, h)
+        }
+    }
+
+    fn source_summary(&self) -> String {
+        match self.mode {
+            TargetMode::Monitor => self
+                .monitors
+                .get(self.selected_monitor)
+                .map(|m| m.label.clone())
+                .unwrap_or_else(|| "No display selected".to_string()),
+            TargetMode::Window => self
+                .windows
+                .get(self.selected_window)
+                .map(|w| w.label.clone())
+                .unwrap_or_else(|| "No window selected".to_string()),
+        }
+    }
+
     fn header(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("ScreenRec").size(24.0).strong().color(TEXT));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("pro · minimal · hardware accelerated")
-                    .size(11.0)
-                    .color(MUTED),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new("F9: Rec · F10: Pause")
-                        .size(11.0)
-                        .color(ACCENT_HI),
-                );
+        let frame = egui::Frame::new()
+            .fill(PANEL_TOP)
+            .inner_margin(Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Image::new(&self.logo_texture)
+                            .fit_to_exact_size(Vec2::splat(34.0))
+                            .corner_radius(CornerRadius::same(9)),
+                    );
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("ScreenRec").size(18.0).strong().color(TEXT));
+                        ui.label(
+                            RichText::new("Screen recording, refined")
+                                .size(10.5)
+                                .color(MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        pill(ui, "v0.1.0", TEXT_SOFT, SURFACE_ELEVATED, BORDER);
+                        ui.add_space(12.0);
+                        shortcut(ui, "F10", "Pause");
+                        ui.add_space(10.0);
+                        shortcut(ui, "F9", "Record");
+                    });
+                });
             });
-        });
+
+        let rect = frame.response.rect;
+        ui.painter().line_segment(
+            [
+                pos2(rect.left(), rect.bottom()),
+                pos2(rect.right(), rect.bottom()),
+            ],
+            Stroke::new(1.0, BORDER_SOFT),
+        );
+    }
+
+    fn status_bar(&self, ui: &mut egui::Ui) {
+        let frame = egui::Frame::new()
+            .fill(PANEL_TOP)
+            .inner_margin(Margin::symmetric(20, 7))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (label, color) = if self.error.is_some() {
+                        ("Attention needed", DANGER)
+                    } else if self.recording.is_some() {
+                        ("Recording", DANGER)
+                    } else if !matches!(self.task, Task::Idle) {
+                        ("Working", CAUTION)
+                    } else {
+                        ("Ready", SUCCESS)
+                    };
+
+                    status_dot(ui, color);
+                    ui.add_space(5.0);
+                    ui.label(RichText::new(label).size(10.5).color(MUTED));
+
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if self.hotkeys_enabled {
+                            ui.label(
+                                RichText::new("F9 record  ·  F10 pause  ·  F11 screenshot")
+                                    .size(9.5)
+                                    .color(MUTED_DIM),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("Global hotkeys disabled")
+                                    .size(9.5)
+                                    .color(MUTED_DIM),
+                            );
+                        }
+                    });
+                });
+            });
+
+        let rect = frame.response.rect;
+        ui.painter().line_segment(
+            [
+                pos2(rect.left(), rect.top()),
+                pos2(rect.right(), rect.top()),
+            ],
+            Stroke::new(1.0, BORDER_SOFT),
+        );
     }
 
     fn source_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
-            section_title(ui, "Capture Source");
-            ui.add_space(6.0);
+            section_header(ui, Icon::Monitor, "Capture", "Source and area");
+            ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.mode, TargetMode::Monitor, "Display");
-                ui.selectable_value(&mut self.mode, TargetMode::Window, "Window");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Refresh").size(12.0))
-                                .fill(CARD_HI)
-                                .corner_radius(CornerRadius::same(7)),
-                        )
-                        .clicked()
-                    {
-                        self.refresh_sources();
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
+            segmented(
+                ui,
+                "target_mode",
+                &mut self.mode,
+                &[
+                    (TargetMode::Monitor, Icon::Monitor, "Display"),
+                    (TargetMode::Window, Icon::Window, "Window"),
+                ],
+            );
+            ui.add_space(10.0);
 
             match self.mode {
                 TargetMode::Monitor => {
+                    field_label(ui, Some(Icon::Monitor), "Display");
                     let labels: Vec<String> =
                         self.monitors.iter().map(|m| m.label.clone()).collect();
                     let current = labels
                         .get(self.selected_monitor)
                         .cloned()
                         .unwrap_or_else(|| "No displays detected".to_string());
+                    select_index(ui, "monitor", &current, &labels, &mut self.selected_monitor);
 
-                    egui::ComboBox::from_id_salt("monitor")
-                        .selected_text(RichText::new(current).color(TEXT))
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            if labels.is_empty() {
-                                ui.label("No displays detected");
+                    ui.add_space(8.0);
+                    toggle_row(
+                        ui,
+                        Icon::Crop,
+                        "Record a region",
+                        "Limit capture to part of the display",
+                        &mut self.region_enabled,
+                    );
+
+                    if self.region_enabled {
+                        ui.add_space(8.0);
+                        let (max_w, max_h) = self
+                            .monitors
+                            .get(self.selected_monitor)
+                            .map(|m| {
+                                (
+                                    m.handle.width().unwrap_or(0),
+                                    m.handle.height().unwrap_or(0),
+                                )
+                            })
+                            .unwrap_or((0, 0));
+
+                        mask(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                number_field(ui, "X", &mut self.region_x, 0..=max_w);
+                                ui.add_space(6.0);
+                                number_field(ui, "Y", &mut self.region_y, 0..=max_h);
+                                ui.add_space(6.0);
+                                number_field(ui, "W", &mut self.region_width, 2..=max_w.max(2));
+                                ui.add_space(6.0);
+                                number_field(ui, "H", &mut self.region_height, 2..=max_h.max(2));
+                            });
+
+                            ui.add_space(8.0);
+                            if wide_button(
+                                ui,
+                                Some(Icon::Crop),
+                                "Select region on screen",
+                                ButtonKind::Secondary,
+                                34.0,
+                            )
+                            .clicked()
+                            {
+                                self.start_region_picker();
                             }
-                            for (index, label) in labels.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.selected_monitor,
-                                    index,
-                                    label.as_str(),
+
+                            if self.region_width <= 1 || self.region_height <= 1 {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Drag over the display to set an area.")
+                                        .size(10.5)
+                                        .color(CAUTION),
                                 );
                             }
                         });
+                    }
                 }
                 TargetMode::Window => {
+                    field_label(ui, Some(Icon::Window), "Window");
                     let labels: Vec<String> =
                         self.windows.iter().map(|w| w.label.clone()).collect();
                     let current = labels
                         .get(self.selected_window)
                         .cloned()
                         .unwrap_or_else(|| "No windows detected".to_string());
+                    select_index(ui, "window", &current, &labels, &mut self.selected_window);
 
-                    egui::ComboBox::from_id_salt("window")
-                        .selected_text(RichText::new(current).color(TEXT))
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            if labels.is_empty() {
-                                ui.label("No visible windows found. Click Refresh.");
-                            }
-                            for (index, label) in labels.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.selected_window,
-                                    index,
-                                    label.as_str(),
-                                );
-                            }
-                        });
-                }
-            }
-
-            if self.mode == TargetMode::Monitor {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.region_enabled, "Record a region");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("Select region").size(12.0))
-                                    .fill(CARD_HI)
-                                    .corner_radius(CornerRadius::same(7)),
-                            )
-                            .clicked()
-                        {
-                            self.start_region_picker();
-                        }
-                    });
-                });
-
-                if self.region_enabled {
-                    let (max_w, max_h) = self
-                        .monitors
-                        .get(self.selected_monitor)
-                        .map(|m| {
-                            (
-                                m.handle.width().unwrap_or(0),
-                                m.handle.height().unwrap_or(0),
-                            )
-                        })
-                        .unwrap_or((0, 0));
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("X").size(11.0).color(MUTED));
-                        ui.add(
-                            egui::DragValue::new(&mut self.region_x)
-                                .range(0..=max_w)
-                                .speed(1.0),
-                        );
-                        ui.label(RichText::new("Y").size(11.0).color(MUTED));
-                        ui.add(
-                            egui::DragValue::new(&mut self.region_y)
-                                .range(0..=max_h)
-                                .speed(1.0),
-                        );
-                        ui.label(RichText::new("W").size(11.0).color(MUTED));
-                        ui.add(
-                            egui::DragValue::new(&mut self.region_width)
-                                .range(2..=max_w.max(2))
-                                .speed(1.0),
-                        );
-                        ui.label(RichText::new("H").size(11.0).color(MUTED));
-                        ui.add(
-                            egui::DragValue::new(&mut self.region_height)
-                                .range(2..=max_h.max(2))
-                                .speed(1.0),
-                        );
-                    });
-
-                    if self.region_width <= 1 || self.region_height <= 1 {
+                    if self.windows.is_empty() {
+                        ui.add_space(6.0);
                         ui.label(
-                            RichText::new("Click \"Select region\" and drag over the display.")
-                                .size(11.0)
+                            RichText::new("No visible windows found. Open an app, then refresh.")
+                                .size(10.5)
                                 .color(CAUTION),
                         );
+                        ui.add_space(6.0);
+                        if wide_button(
+                            ui,
+                            Some(Icon::Refresh),
+                            "Refresh window list",
+                            ButtonKind::Secondary,
+                            34.0,
+                        )
+                        .clicked()
+                        {
+                            self.refresh_sources();
+                        }
                     }
                 }
             }
@@ -1161,254 +1319,556 @@ impl App {
 
     fn video_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
-            section_title(ui, "Video Settings");
-            ui.add_space(6.0);
+            section_header(ui, Icon::Sliders, "Video", "Frame rate, quality and codec");
+            ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Frame rate").color(MUTED));
-                ui.add_space(6.0);
-                for fps in [24u32, 30, 60, 120] {
-                    if ui
-                        .selectable_label(self.fps == fps, format!("{fps} fps"))
-                        .clicked()
-                    {
-                        self.fps = fps;
-                    }
-                }
+            field_label(ui, Some(Icon::Timer), "Frame rate");
+            segmented(
+                ui,
+                "fps",
+                &mut self.fps,
+                &[
+                    (24u32, Icon::Timer, "24"),
+                    (30, Icon::Timer, "30"),
+                    (60, Icon::Timer, "60"),
+                    (120, Icon::Timer, "120"),
+                ],
+            );
+            ui.add_space(10.0);
+
+            ui.columns(2, |columns| {
+                columns[0].vertical(|ui| {
+                    field_label(ui, Some(Icon::Film), "Quality");
+                    select_enum(
+                        ui,
+                        "quality",
+                        self.quality.label(),
+                        &Quality::ALL.map(|quality| (quality, quality.label())),
+                        &mut self.quality,
+                    );
+                });
+
+                columns[1].vertical(|ui| {
+                    field_label(ui, Some(Icon::Chip), "Codec");
+                    select_enum(
+                        ui,
+                        "codec",
+                        self.codec.label(),
+                        &[(Codec::H264, "H.264"), (Codec::Hevc, "HEVC")],
+                        &mut self.codec,
+                    );
+                });
             });
 
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Quality").color(MUTED));
-                ui.add_space(6.0);
-                egui::ComboBox::from_id_salt("quality")
-                    .selected_text(self.quality.label())
-                    .width(110.0)
-                    .show_ui(ui, |ui| {
-                        for quality in Quality::ALL {
-                            ui.selectable_value(&mut self.quality, quality, quality.label());
-                        }
+            ui.add_space(10.0);
+            let (w, h) = self.output_dimensions();
+            mask(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Output").size(10.5).color(MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{w} × {h}"))
+                                .size(11.0)
+                                .strong()
+                                .color(TEXT_SOFT),
+                        );
                     });
-
-                ui.add_space(12.0);
-                ui.label(RichText::new("Codec").color(MUTED));
-                ui.add_space(6.0);
-                egui::ComboBox::from_id_salt("codec")
-                    .selected_text(self.codec.label())
-                    .width(95.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.codec, Codec::H264, "H.264");
-                        ui.selectable_value(&mut self.codec, Codec::Hevc, "HEVC");
-                    });
+                });
+                ui.add_space(3.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} fps · {} · hardware accelerated",
+                        self.fps,
+                        self.codec.label()
+                    ))
+                    .size(10.0)
+                    .color(MUTED_DIM),
+                );
             });
         });
     }
 
     fn audio_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
-            section_title(ui, "Audio & Input");
-            ui.add_space(6.0);
-            ui.checkbox(&mut self.system_audio, "System audio (speakers / headset)");
-            ui.add_space(2.0);
-            ui.checkbox(&mut self.microphone, "Microphone (voice input)");
-            ui.add_space(2.0);
-            ui.checkbox(&mut self.capture_cursor, "Capture mouse cursor");
+            section_header(ui, Icon::Speaker, "Audio & input", "What gets captured");
+            ui.add_space(8.0);
+
+            toggle_row(
+                ui,
+                Icon::Speaker,
+                "System audio",
+                "Capture speakers or headphones",
+                &mut self.system_audio,
+            );
+            toggle_row(
+                ui,
+                Icon::Microphone,
+                "Microphone",
+                "Add voice narration",
+                &mut self.microphone,
+            );
+            toggle_row(
+                ui,
+                Icon::Cursor,
+                "Mouse cursor",
+                "Show the pointer in the recording",
+                &mut self.capture_cursor,
+            );
         });
     }
 
     fn webcam_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
-            section_title(ui, "Webcam Overlay");
-            ui.add_space(6.0);
+            section_header(ui, Icon::Camera, "Camera", "Webcam overlay");
+            ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.webcam_enabled, "Show webcam bubble");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Refresh").size(12.0))
-                                .fill(CARD_HI)
-                                .corner_radius(CornerRadius::same(7)),
-                        )
-                        .clicked()
-                    {
-                        self.refresh_webcams();
-                    }
-                });
-            });
+            toggle_row(
+                ui,
+                Icon::Camera,
+                "Show webcam bubble",
+                "Overlay your camera on the capture",
+                &mut self.webcam_enabled,
+            );
 
             if self.webcam_enabled {
-                if self.webcam_devices.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("No camera detected. Connect a camera and press Refresh.")
-                            .size(11.0)
-                            .color(CAUTION),
-                    );
-                } else {
-                    let labels = self.webcam_devices.clone();
-                    let current = labels
-                        .get(self.webcam_device)
-                        .cloned()
-                        .unwrap_or_else(|| "Camera".to_string());
+                ui.add_space(8.0);
+                mask(ui, |ui| {
+                    if self.webcam_devices.is_empty() {
+                        ui.label(
+                            RichText::new("No camera detected. Connect a camera and refresh.")
+                                .size(10.5)
+                                .color(CAUTION),
+                        );
+                        ui.add_space(6.0);
+                        if wide_button(
+                            ui,
+                            Some(Icon::Refresh),
+                            "Refresh cameras",
+                            ButtonKind::Secondary,
+                            32.0,
+                        )
+                        .clicked()
+                        {
+                            self.refresh_webcams();
+                        }
+                    } else {
+                        field_label(ui, Some(Icon::Camera), "Camera");
+                        let labels: Vec<String> = self
+                            .webcam_devices
+                            .iter()
+                            .map(|name| truncate(name, 48))
+                            .collect();
+                        let current = labels
+                            .get(self.webcam_device)
+                            .cloned()
+                            .unwrap_or_else(|| "Camera".to_string());
+                        select_index(
+                            ui,
+                            "webcam_device",
+                            &current,
+                            &labels,
+                            &mut self.webcam_device,
+                        );
 
-                    ui.add_space(4.0);
-                    egui::ComboBox::from_id_salt("webcam_device")
-                        .selected_text(RichText::new(truncate(&current, 32)).color(TEXT))
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            for (index, label) in labels.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.webcam_device,
-                                    index,
-                                    truncate(label, 48),
-                                );
-                            }
-                        });
-
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Size").color(MUTED));
+                        ui.add_space(8.0);
+                        field_label(ui, Some(Icon::Sliders), "Size");
                         ui.add(
                             egui::Slider::new(&mut self.webcam_size, 8..=60)
                                 .suffix("%")
                                 .show_value(true),
                         );
-                    });
 
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Corner").color(MUTED));
-                        egui::ComboBox::from_id_salt("webcam_corner")
-                            .selected_text(self.webcam_corner.label())
-                            .width(130.0)
-                            .show_ui(ui, |ui| {
-                                for corner in Corner::ALL {
-                                    ui.selectable_value(
-                                        &mut self.webcam_corner,
-                                        corner,
-                                        corner.label(),
-                                    );
-                                }
-                            });
                         ui.add_space(8.0);
-                        ui.checkbox(&mut self.webcam_mirror, "Mirror");
-                    });
-                }
+                        field_label(ui, Some(Icon::Crop), "Position");
+                        select_enum(
+                            ui,
+                            "webcam_corner",
+                            self.webcam_corner.label(),
+                            &Corner::ALL.map(|corner| (corner, corner.label())),
+                            &mut self.webcam_corner,
+                        );
+
+                        ui.add_space(4.0);
+                        toggle_row(
+                            ui,
+                            Icon::Cursor,
+                            "Mirror camera",
+                            "Flip the preview horizontally",
+                            &mut self.webcam_mirror,
+                        );
+                    }
+                });
             }
         });
     }
 
     fn preferences_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
-            section_title(ui, "Recording Preferences");
-            ui.add_space(6.0);
+            section_header(ui, Icon::Record, "Recording", "Timing and shortcuts");
+            ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Countdown:").color(MUTED));
-                ui.add_space(4.0);
-                if ui.selectable_label(self.countdown_secs == 0, "None").clicked() {
-                    self.countdown_secs = 0;
-                }
-                if ui.selectable_label(self.countdown_secs == 3, "3s").clicked() {
-                    self.countdown_secs = 3;
-                }
-                if ui.selectable_label(self.countdown_secs == 5, "5s").clicked() {
-                    self.countdown_secs = 5;
-                }
-            });
+            field_label(ui, Some(Icon::Timer), "Countdown");
+            segmented(
+                ui,
+                "countdown",
+                &mut self.countdown_secs,
+                &[
+                    (0u8, Icon::Timer, "Off"),
+                    (3, Icon::Timer, "3 sec"),
+                    (5, Icon::Timer, "5 sec"),
+                    (10, Icon::Timer, "10 sec"),
+                ],
+            );
 
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Auto-stop:").color(MUTED));
-                for (secs, label) in [
-                    (0u64, "Off"),
-                    (60, "1m"),
-                    (300, "5m"),
-                    (600, "10m"),
-                    (1800, "30m"),
-                    (3600, "60m"),
-                ] {
-                    if ui
-                        .selectable_label(self.max_duration_secs == secs, label)
-                        .clicked()
-                    {
-                        self.max_duration_secs = secs;
-                    }
-                }
-            });
+            ui.add_space(10.0);
+            field_label(ui, Some(Icon::Stop), "Auto-stop");
+            segmented(
+                ui,
+                "max_duration",
+                &mut self.max_duration_secs,
+                &[
+                    (0u64, Icon::Stop, "Off"),
+                    (60, Icon::Stop, "1m"),
+                    (300, Icon::Stop, "5m"),
+                    (600, Icon::Stop, "10m"),
+                    (1800, Icon::Stop, "30m"),
+                    (3600, Icon::Stop, "60m"),
+                ],
+            );
 
-            ui.add_space(4.0);
-            ui.checkbox(&mut self.minimize_on_record, "Minimize window when recording starts");
-            ui.add_space(2.0);
-            ui.checkbox(&mut self.hotkeys_enabled, "Enable global hotkeys (F9 / F10 / F11)");
+            ui.add_space(8.0);
+            toggle_row(
+                ui,
+                Icon::Window,
+                "Minimize while recording",
+                "Keep the capture clean and unobstructed",
+                &mut self.minimize_on_record,
+            );
+            toggle_row(
+                ui,
+                Icon::Keyboard,
+                "Global hotkeys",
+                "F9 record · F10 pause · F11 screenshot",
+                &mut self.hotkeys_enabled,
+            );
         });
     }
 
-    fn output_card(&mut self, ui: &mut egui::Ui) {
+    fn controls(&mut self, ui: &mut egui::Ui) {
+        let countdown = match &self.task {
+            Task::Countdown { secs_left, .. } => Some(*secs_left),
+            _ => None,
+        };
+
         card(ui, |ui| {
-            section_title(ui, "Destination Folder");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let width = (ui.available_width() - 148.0).max(80.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.output_dir)
-                        .desired_width(width)
-                        .text_color(TEXT),
-                );
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("Browse...").size(12.0))
-                            .fill(CARD_HI)
-                            .corner_radius(CornerRadius::same(7)),
+            if let Some(recording) = &self.recording {
+                let elapsed = recording.elapsed();
+                let size = util::human_size(recording.file_size());
+                let paused = recording.is_paused();
+                let level = (recording.audio_level() as f32 / 100.0).clamp(0.0, 1.0);
+                let warning = recording.error();
+                let max_duration = self.max_duration_secs;
+
+                ui.horizontal(|ui| {
+                    if paused {
+                        status_pill(ui, "PAUSED", CAUTION, CAUTION_SOFT);
+                    } else {
+                        status_pill(ui, "RECORDING", DANGER, DANGER_SOFT);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        keycap(ui, "F9");
+                    });
+                });
+
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(fmt_duration(elapsed))
+                            .font(FontId::monospace(38.0))
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new(if paused {
+                            "Recording paused"
+                        } else {
+                            "Recording in progress"
+                        })
+                        .size(11.0)
+                        .color(MUTED),
+                    );
+                });
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    stat(ui, "FRAME RATE", &format!("{:.0} fps", self.display_fps));
+                    ui.add_space(18.0);
+                    stat(ui, "FILE SIZE", &size);
+                    if max_duration > 0 {
+                        ui.add_space(18.0);
+                        let left = max_duration.saturating_sub(elapsed.as_secs());
+                        stat(ui, "TIME LEFT", &fmt_duration(Duration::from_secs(left)));
+                    }
+                });
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Audio level").size(10.5).color(MUTED));
+                    let meter_w = (ui.available_width() - 56.0).max(80.0);
+                    level_meter(ui, level, meter_w);
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("{:.0}%", level * 100.0))
+                            .size(10.0)
+                            .color(MUTED_DIM),
+                    );
+                });
+
+                if let Some(message) = warning {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(message).size(10.5).color(CAUTION));
+                }
+
+                ui.add_space(14.0);
+                let mut pause_clicked = false;
+                let mut stop_clicked = false;
+                let mut screenshot_clicked = false;
+
+                ui.horizontal(|ui| {
+                    let half = (ui.available_width() - 8.0) / 2.0;
+                    let pause_kind = if paused {
+                        ButtonKind::Success
+                    } else {
+                        ButtonKind::Secondary
+                    };
+                    if button_sized(
+                        ui,
+                        Some(if paused { Icon::Play } else { Icon::Pause }),
+                        if paused { "Resume" } else { "Pause" },
+                        pause_kind,
+                        half,
+                        40.0,
                     )
                     .clicked()
+                    {
+                        pause_clicked = true;
+                    }
+                    if button_sized(ui, Some(Icon::Stop), "Stop", ButtonKind::Danger, half, 40.0)
+                        .clicked()
+                    {
+                        stop_clicked = true;
+                    }
+                });
+
+                ui.add_space(8.0);
+                if wide_button(
+                    ui,
+                    Some(Icon::Screenshot),
+                    "Take screenshot",
+                    ButtonKind::Secondary,
+                    36.0,
+                )
+                .clicked()
+                {
+                    screenshot_clicked = true;
+                }
+
+                if pause_clicked {
+                    if paused {
+                        recording.resume();
+                    } else {
+                        recording.pause();
+                    }
+                }
+
+                if stop_clicked {
+                    self.begin_stop();
+                } else if screenshot_clicked {
+                    self.take_screenshot();
+                }
+            } else if let Some(secs_left) = countdown {
+                ui.horizontal(|ui| {
+                    status_pill(ui, "STARTING", CAUTION, CAUTION_SOFT);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        keycap(ui, "F9");
+                    });
+                });
+
+                ui.add_space(18.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(secs_left.to_string())
+                            .font(FontId::monospace(52.0))
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new("Recording will begin shortly")
+                            .size(11.5)
+                            .color(MUTED),
+                    );
+                });
+                ui.add_space(18.0);
+
+                if wide_button(ui, Some(Icon::Close), "Cancel", ButtonKind::Secondary, 38.0)
+                    .clicked()
+                {
+                    self.task = Task::Idle;
+                }
+            } else if !matches!(self.task, Task::Idle) {
+                let (label, detail) = match &self.task {
+                    Task::Starting(_) => (
+                        "Initializing encoder",
+                        "Preparing capture and audio devices",
+                    ),
+                    Task::Stopping(_) => ("Finalizing recording", "Writing the video file to disk"),
+                    Task::PickingFolder(_) => (
+                        "Choosing folder",
+                        "Select a destination for your recordings",
+                    ),
+                    Task::Screenshot(_) => ("Capturing screenshot", "Saving the current frame"),
+                    _ => ("Working", "Please wait"),
+                };
+
+                ui.horizontal(|ui| {
+                    status_pill(ui, "BUSY", ACCENT, ACCENT_SOFT);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        keycap(ui, "F9");
+                    });
+                });
+                ui.add_space(18.0);
+                ui.vertical_centered(|ui| {
+                    ui.add(egui::Spinner::new().size(28.0).color(ACCENT_HI));
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(label).size(13.0).strong().color(TEXT));
+                    ui.label(RichText::new(detail).size(10.5).color(MUTED));
+                });
+                ui.add_space(18.0);
+            } else {
+                ui.horizontal(|ui| {
+                    status_pill(ui, "READY", SUCCESS, SUCCESS_SOFT);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        keycap(ui, "F9");
+                    });
+                });
+
+                ui.add_space(16.0);
+                let mut start_clicked = false;
+                let mut screenshot_clicked = false;
+
+                ui.vertical_centered(|ui| {
+                    if record_button(ui, 82.0).clicked() {
+                        start_clicked = true;
+                    }
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Start recording")
+                            .size(13.5)
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Click the button or press F9")
+                            .size(10.5)
+                            .color(MUTED),
+                    );
+                });
+                ui.add_space(16.0);
+
+                let (w, h) = self.output_dimensions();
+                let source = truncate(&self.source_summary(), 28);
+                mask(ui, |ui| {
+                    detail_row(ui, Icon::Monitor, "Source", &source);
+                    detail_row(
+                        ui,
+                        Icon::Film,
+                        "Output",
+                        &format!("{w} × {h} · {} fps", self.fps),
+                    );
+                    detail_row(
+                        ui,
+                        Icon::Bolt,
+                        "Encoder",
+                        &format!("{} · hardware accelerated", self.codec.label()),
+                    );
+                });
+
+                ui.add_space(12.0);
+                if wide_button(
+                    ui,
+                    Some(Icon::Screenshot),
+                    "Take screenshot",
+                    ButtonKind::Secondary,
+                    38.0,
+                )
+                .clicked()
+                {
+                    screenshot_clicked = true;
+                }
+
+                if start_clicked {
+                    self.request_start();
+                }
+                if screenshot_clicked {
+                    self.take_screenshot();
+                }
+            }
+        });
+    }
+
+    fn destination_card(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            section_header(ui, Icon::Folder, "Destination", "Where captures are saved");
+            ui.add_space(10.0);
+
+            ui.horizontal(|ui| {
+                let gap = ui.spacing().item_spacing.x;
+                let browse_w = 78.0;
+                let open_w = 62.0;
+                let input_w = (ui.available_width() - browse_w - open_w - gap * 2.0).max(80.0);
+
+                let input = egui::TextEdit::singleline(&mut self.output_dir)
+                    .text_color(TEXT)
+                    .frame(
+                        egui::Frame::new()
+                            .fill(INPUT_BG)
+                            .corner_radius(CornerRadius::same(8))
+                            .stroke(Stroke::new(1.0, BORDER))
+                            .inner_margin(Margin::symmetric(10, 7)),
+                    );
+                ui.add_sized(vec2(input_w, 32.0), input);
+
+                if button_sized(ui, None, "Browse", ButtonKind::Secondary, browse_w, 32.0).clicked()
                 {
                     self.browse_output_folder();
                 }
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("Open").size(12.0))
-                            .fill(CARD_HI)
-                            .corner_radius(CornerRadius::same(7)),
-                    )
-                    .clicked()
-                {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(self.output_dir.trim())
-                        .spawn();
+                if button_sized(ui, None, "Open", ButtonKind::Secondary, open_w, 32.0).clicked() {
+                    open_path(Path::new(self.output_dir.trim()));
                 }
             });
         });
     }
 
-    fn history_card(&mut self, ui: &mut egui::Ui) {
+    fn recent_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                section_title(ui, "Recent Recordings");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Open folder").size(12.0))
-                                .fill(CARD_HI)
-                                .corner_radius(CornerRadius::same(7)),
-                        )
-                        .clicked()
-                    {
-                        let _ = std::process::Command::new("explorer.exe")
-                            .arg(self.output_dir.trim())
-                            .spawn();
+                section_header_left(ui, Icon::Film, "Recent", "Latest captures");
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, Icon::Open, "Open recordings folder").clicked() {
+                        open_path(Path::new(self.output_dir.trim()));
                     }
                 });
             });
-            ui.add_space(6.0);
+            ui.add_space(10.0);
 
             let entries: Vec<HistoryEntry> = self.history.iter().take(6).cloned().collect();
             if entries.is_empty() {
-                ui.label(
-                    RichText::new("Recordings and screenshots will appear here.")
-                        .size(11.0)
-                        .color(MUTED),
+                empty_state(
+                    ui,
+                    Icon::Film,
+                    "No captures yet",
+                    "Recordings and screenshots will appear here.",
                 );
                 return;
             }
@@ -1420,88 +1880,105 @@ impl App {
             for entry in &entries {
                 let path = entry.path_buf();
                 let is_pending = self.pending_delete.as_deref() == Some(entry.path.as_str());
-                ui.horizontal(|ui| {
-                    let icon = if entry.kind == "screenshot" { "🖼" } else { "🎬" };
-                    ui.label(RichText::new(icon).size(14.0).color(TEXT));
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(truncate(&entry.file_name(), 30))
-                                .size(12.0)
-                                .color(TEXT),
-                        );
-                        let detail = if entry.kind == "screenshot" {
-                            util::human_size(entry.size)
-                        } else {
-                            format!(
-                                "{} · {}",
-                                util::human_duration(entry.duration_secs.round() as u64),
-                                util::human_size(entry.size)
-                            )
-                        };
-                        ui.label(RichText::new(detail).size(10.0).color(MUTED));
-                    });
+                let (fg, bg) = if entry.kind == "screenshot" {
+                    (SUCCESS, SUCCESS_SOFT)
+                } else {
+                    (ACCENT_HI, ACCENT_SOFT)
+                };
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if is_pending {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Delete").size(11.0))
-                                        .fill(DANGER)
-                                        .corner_radius(CornerRadius::same(6)),
-                                )
-                                .clicked()
-                            {
-                                confirm_delete = Some(entry.path.clone());
-                            }
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Cancel").size(11.0))
-                                        .fill(CARD_HI)
-                                        .corner_radius(CornerRadius::same(6)),
-                                )
-                                .clicked()
-                            {
-                                cancel_delete = true;
-                            }
-                        } else {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Delete").size(11.0))
-                                        .fill(CARD_HI)
-                                        .corner_radius(CornerRadius::same(6)),
-                                )
-                                .clicked()
-                            {
-                                request_delete = Some(entry.path.clone());
-                            }
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Folder").size(11.0))
-                                        .fill(CARD_HI)
-                                        .corner_radius(CornerRadius::same(6)),
-                                )
-                                .clicked()
-                            {
-                                let _ = std::process::Command::new("explorer.exe")
-                                    .arg(format!("/select,{}", path.display()))
-                                    .spawn();
-                            }
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Play").size(11.0))
-                                        .fill(ACCENT)
-                                        .corner_radius(CornerRadius::same(6)),
-                                )
-                                .clicked()
-                            {
-                                let _ = std::process::Command::new("explorer.exe")
-                                    .arg(&path)
-                                    .spawn();
-                            }
-                        }
+                egui::Frame::new()
+                    .fill(SURFACE_ELEVATED)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, BORDER_SOFT))
+                    .inner_margin(Margin::symmetric(8, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            icon_badge_sized(
+                                ui,
+                                if entry.kind == "screenshot" {
+                                    Icon::Image
+                                } else {
+                                    Icon::Film
+                                },
+                                fg,
+                                bg,
+                                30.0,
+                            );
+                            ui.add_space(8.0);
+
+                            let actions_w = if is_pending { 60.0 } else { 92.0 };
+                            let text_w = (ui.available_width() - actions_w - 6.0).max(80.0);
+                            ui.allocate_ui_with_layout(
+                                vec2(text_w, 32.0),
+                                egui::Layout::top_down(Align::Min),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(truncate(&entry.file_name(), 26))
+                                            .size(11.5)
+                                            .color(TEXT),
+                                    );
+                                    ui.add_space(1.0);
+                                    let detail = if entry.kind == "screenshot" {
+                                        util::human_size(entry.size)
+                                    } else {
+                                        format!(
+                                            "{} · {}",
+                                            util::human_duration(
+                                                entry.duration_secs.round() as u64
+                                            ),
+                                            util::human_size(entry.size)
+                                        )
+                                    };
+                                    ui.label(
+                                        RichText::new(detail).size(10.0).color(MUTED_DIM),
+                                    );
+                                },
+                            );
+
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                if is_pending {
+                                    if icon_button_sized(ui, Icon::Check, "Delete file", 26.0)
+                                        .clicked()
+                                    {
+                                        confirm_delete = Some(entry.path.clone());
+                                    }
+                                    if icon_button_sized(ui, Icon::Close, "Cancel", 26.0).clicked()
+                                    {
+                                        cancel_delete = true;
+                                    }
+                                } else {
+                                    if icon_button_sized(ui, Icon::Trash, "Delete", 26.0).clicked()
+                                    {
+                                        request_delete = Some(entry.path.clone());
+                                    }
+                                    if icon_button_sized(ui, Icon::Folder, "Show in folder", 26.0)
+                                        .clicked()
+                                    {
+                                        reveal_path(&path);
+                                    }
+                                    if icon_button_sized(
+                                        ui,
+                                        if entry.kind == "screenshot" {
+                                            Icon::Open
+                                        } else {
+                                            Icon::Play
+                                        },
+                                        if entry.kind == "screenshot" {
+                                            "Open"
+                                        } else {
+                                            "Play"
+                                        },
+                                        26.0,
+                                    )
+                                    .clicked()
+                                    {
+                                        open_path(&path);
+                                    }
+                                }
+                            });
+                        });
                     });
-                });
-                ui.add_space(2.0);
+                ui.add_space(6.0);
             }
 
             if let Some(path) = request_delete {
@@ -1519,285 +1996,126 @@ impl App {
         });
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui) {
-        let busy = !matches!(self.task, Task::Idle);
+    fn footer(&mut self, ui: &mut egui::Ui) {
+        let show_saved = self
+            .last_saved_at
+            .is_some_and(|saved| saved.elapsed() < Duration::from_secs(10));
 
-        if let Some(recording) = &self.recording {
-            let elapsed = recording.elapsed();
-            let size = util::human_size(recording.file_size());
-            let is_paused = recording.is_paused();
+        if show_saved && self.last_saved.is_some() {
+            ui.add_space(12.0);
+            self.saved_toast(ui);
+        }
 
-            ui.horizontal(|ui| {
-                let (badge_text, badge_color) = if is_paused {
-                    ("PAUSED", CAUTION)
-                } else {
-                    ("REC", DANGER)
-                };
-                ui.label(RichText::new(badge_text).strong().color(badge_color));
-                let limit = if self.max_duration_secs > 0 {
-                    format!(
-                        "  ·  {} left",
-                        fmt_duration(Duration::from_secs(
-                            self.max_duration_secs.saturating_sub(elapsed.as_secs())
-                        ))
-                    )
-                } else {
-                    String::new()
-                };
-                ui.label(
-                    RichText::new(format!(
-                        "{}  ·  {:.0} fps  ·  {}{}",
-                        fmt_duration(elapsed),
-                        self.display_fps,
-                        size,
-                        limit
-                    ))
-                    .color(TEXT),
-                );
-            });
-
-            // Live Audio Level Visualizer
-            let level = recording.audio_level();
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Audio:").size(11.0).color(MUTED));
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(100.0, 7.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, CornerRadius::same(3), CARD_HI);
-                let fill_pct = (level as f32 / 100.0).clamp(0.0, 1.0);
-                if fill_pct > 0.01 {
-                    let mut fill_rect = rect;
-                    fill_rect.set_width(rect.width() * fill_pct);
-                    let bar_color = if fill_pct > 0.85 {
-                        DANGER
-                    } else if fill_pct > 0.6 {
-                        CAUTION
-                    } else {
-                        SUCCESS
-                    };
-                    ui.painter().rect_filled(fill_rect, CornerRadius::same(3), bar_color);
-                }
-                ui.label(RichText::new(format!("{level}%")).size(10.0).color(MUTED));
-            });
-
-            if let Some(warning) = recording.error() {
-                ui.add_space(2.0);
-                ui.label(RichText::new(warning).size(12.0).color(CAUTION));
-            }
-            ui.add_space(8.0);
-
-            // Recording Action Buttons (Pause / Stop / Screenshot)
-            let mut toggle_pause = false;
-            let mut stop_clicked = false;
-            let mut screenshot_clicked = false;
-
-            ui.horizontal(|ui| {
-                let pause_text = if is_paused { "▶ Resume (F10)" } else { "⏸ Pause (F10)" };
-                let pause_color = if is_paused { SUCCESS } else { CARD_HI };
-
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(pause_text)
-                                .size(15.0)
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(pause_color)
-                        .corner_radius(CornerRadius::same(10))
-                        .min_size(Vec2::new(130.0, 48.0)),
-                    )
-                    .clicked()
-                {
-                    toggle_pause = true;
-                }
-
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("⏹ Stop (F9)")
-                                .size(15.0)
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(DANGER)
-                        .corner_radius(CornerRadius::same(10))
-                        .min_size(Vec2::new(ui.available_width(), 48.0)),
-                    )
-                    .clicked()
-                {
-                    stop_clicked = true;
-                }
-            });
-
-            ui.add_space(6.0);
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new("📸 Screenshot (F11)")
-                            .size(13.0)
-                            .color(TEXT),
-                    )
-                    .fill(CARD_HI)
-                    .corner_radius(CornerRadius::same(8))
-                    .min_size(Vec2::new(ui.available_width(), 32.0)),
-                )
-                .clicked()
-            {
-                screenshot_clicked = true;
-            }
-
-            if toggle_pause {
-                if is_paused {
-                    recording.resume();
-                } else {
-                    recording.pause();
-                }
-            }
-
-            if stop_clicked {
-                self.begin_stop();
-            } else if screenshot_clicked {
-                self.take_screenshot();
-            }
-        } else if let Task::Countdown { secs_left, .. } = self.task {
-            let cancel_btn = egui::Button::new(
-                RichText::new(format!("⏱ Starting in {secs_left}... (Click to cancel)"))
-                    .size(16.0)
-                    .strong()
-                    .color(Color32::WHITE),
-            )
-            .fill(CAUTION)
-            .corner_radius(CornerRadius::same(10))
-            .min_size(Vec2::new(ui.available_width(), 48.0));
-
-            if ui.add(cancel_btn).clicked() {
-                self.task = Task::Idle;
-            }
-        } else {
-            if busy {
-                let label = match self.task {
-                    Task::Starting(_) => "Initializing hardware encoder...",
-                    Task::Stopping(_) => "Finalizing MP4 file...",
-                    Task::PickingFolder(_) => "Selecting output folder...",
-                    Task::Screenshot(_) => "Capturing screenshot...",
-                    _ => "",
-                };
-                ui.label(RichText::new(label).color(MUTED));
-                ui.add_space(8.0);
-            }
-
-            let button = egui::Button::new(
-                RichText::new("⏺ Start recording (F9)")
-                    .size(17.0)
-                    .strong()
-                    .color(Color32::WHITE),
-            )
-            .fill(if busy { CARD_HI } else { ACCENT })
-            .corner_radius(CornerRadius::same(10))
-            .min_size(Vec2::new(ui.available_width(), 48.0));
-
-            if ui.add_enabled(!busy, button).clicked() {
-                self.request_start();
-            }
-
-            let mut screenshot_clicked = false;
-            ui.add_space(6.0);
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new(
-                        RichText::new("📸 Take screenshot (F11)")
-                            .size(13.0)
-                            .color(TEXT),
-                    )
-                    .fill(CARD_HI)
-                    .corner_radius(CornerRadius::same(8))
-                    .min_size(Vec2::new(ui.available_width(), 34.0)),
-                )
-                .clicked()
-            {
-                screenshot_clicked = true;
-            }
-            if screenshot_clicked {
-                self.take_screenshot();
-            }
-
-            if !busy {
-                let hint = if self.mode == TargetMode::Window && self.windows.is_empty() {
-                    "No windows available. Open an application, then press Refresh."
-                } else {
-                    "Hardware accelerated H.264/HEVC · Zero dropped frames"
-                };
-                ui.add_space(6.0);
-                ui.label(RichText::new(hint).size(11.0).color(MUTED));
-            }
+        if self.error.is_some() {
+            ui.add_space(12.0);
+            self.error_banner(ui);
         }
     }
 
-    fn footer(&mut self, ui: &mut egui::Ui) {
-        if let Some(path) = &self.last_saved {
-            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            ui.add_space(8.0);
-            card(ui, |ui| {
+    fn saved_toast(&self, ui: &mut egui::Ui) {
+        let Some(path) = self.last_saved.clone() else {
+            return;
+        };
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let is_video = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+        let open_icon = if is_video { Icon::Play } else { Icon::Open };
+
+        egui::Frame::new()
+            .fill(SUCCESS_SOFT)
+            .corner_radius(CornerRadius::same(10))
+            .stroke(Stroke::new(1.0, SUCCESS.gamma_multiply(0.35)))
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✓").color(SUCCESS).strong().size(16.0));
+                    icon_badge_sized(
+                        ui,
+                        Icon::Check,
+                        SUCCESS,
+                        Color32::from_rgb(24, 52, 33),
+                        30.0,
+                    );
+                    ui.add_space(9.0);
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new("Saved successfully").strong().color(TEXT),
+                            RichText::new("Saved successfully")
+                                .size(12.0)
+                                .strong()
+                                .color(TEXT),
                         );
                         ui.label(
                             RichText::new(format!(
-                                "{} ({})",
-                                truncate(&path.to_string_lossy(), 42),
+                                "{} · {}",
+                                truncate(&file_name(&path), 28),
                                 util::human_size(size)
                             ))
-                            .size(11.0)
+                            .size(10.0)
                             .color(MUTED),
                         );
                     });
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("▶ Play").size(12.0).color(Color32::WHITE))
-                                .fill(ACCENT)
-                                .corner_radius(CornerRadius::same(6)),
-                        )
-                        .clicked()
-                    {
-                        let _ = std::process::Command::new("explorer.exe")
-                            .arg(path)
-                            .spawn();
+                    if button(ui, Some(open_icon), "Open", ButtonKind::Secondary).clicked() {
+                        open_path(&path);
                     }
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("📁 Show in folder").size(12.0).color(TEXT))
-                                .fill(CARD_HI)
-                                .corner_radius(CornerRadius::same(6)),
-                        )
-                        .clicked()
+                    if button(
+                        ui,
+                        Some(Icon::Folder),
+                        "Show in folder",
+                        ButtonKind::Secondary,
+                    )
+                    .clicked()
                     {
-                        let _ = std::process::Command::new("explorer.exe")
-                            .arg(format!("/select,{}", path.display()))
-                            .spawn();
+                        reveal_path(&path);
                     }
                 });
             });
-        }
+    }
 
-        if let Some(error) = &self.error {
-            ui.add_space(8.0);
-            egui::Frame::new()
-                .fill(Color32::from_rgb(46, 20, 24))
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(Margin::same(10))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(120, 40, 48)))
-                .show(ui, |ui| {
-                    ui.label(RichText::new(error).size(12.0).color(Color32::from_rgb(252, 165, 165)));
+    fn error_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(message) = self.error.clone() else {
+            return;
+        };
+
+        egui::Frame::new()
+            .fill(DANGER_SOFT)
+            .corner_radius(CornerRadius::same(10))
+            .stroke(Stroke::new(1.0, DANGER_BORDER))
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    icon_badge_sized(ui, Icon::Alert, DANGER, Color32::from_rgb(58, 27, 31), 30.0);
+                    ui.add_space(9.0);
+
+                    let text_w = (ui.available_width() - 38.0).max(100.0);
+                    ui.allocate_ui_with_layout(
+                        vec2(text_w, 0.0),
+                        egui::Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.label(
+                                RichText::new("Something went wrong")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(TEXT),
+                            );
+                            ui.label(
+                                RichText::new(&message)
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(240, 160, 164)),
+                            );
+                        },
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, Icon::Close, "Dismiss").clicked() {
+                            self.error = None;
+                        }
+                    });
                 });
-        }
+            });
     }
 }
 
@@ -1812,52 +2130,93 @@ impl eframe::App for App {
             self.save_prefs();
         }
 
-        // Repaint at ~15-20 fps when recording, counting down, or running background tasks
         if self.recording.is_some()
             || !matches!(self.task, Task::Idle)
             || self.region_picker.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(60));
+        } else if self
+            .last_saved_at
+            .is_some_and(|saved| saved.elapsed() < Duration::from_secs(10))
+        {
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
+
+        egui::Panel::top("app_header")
+            .exact_size(62.0)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                self.header(ui);
+            });
+
+        egui::Panel::bottom("app_status")
+            .exact_size(30.0)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                self.status_bar(ui);
+            });
+
+        egui::Panel::right("control_panel")
+            .exact_size(360.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(BG)
+                    .inner_margin(Margin::symmetric(16, 16)),
+            )
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("control_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.controls(ui);
+                        self.footer(ui);
+                        ui.add_space(12.0);
+                        self.destination_card(ui);
+                        ui.add_space(12.0);
+                        self.recent_card(ui);
+                    });
+            });
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(BG)
-                    .inner_margin(Margin::same(18)),
+                    .inner_margin(Margin::symmetric(20, 16)),
             )
             .show(ui, |ui| {
-                self.header(ui);
-                ui.add_space(10.0);
-
                 egui::ScrollArea::vertical()
+                    .id_salt("settings_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.source_card(ui);
-                        ui.add_space(10.0);
-                        self.video_card(ui);
-                        ui.add_space(10.0);
-                        self.audio_card(ui);
-                        ui.add_space(10.0);
-                        self.webcam_card(ui);
-                        ui.add_space(10.0);
-                        self.preferences_card(ui);
-                        ui.add_space(10.0);
-                        self.output_card(ui);
                         ui.add_space(12.0);
-                        self.controls(ui);
-                        self.history_card(ui);
-                        self.footer(ui);
+                        self.video_card(ui);
+                        ui.add_space(12.0);
+                        self.audio_card(ui);
+                        ui.add_space(12.0);
+                        self.webcam_card(ui);
+                        ui.add_space(12.0);
+                        self.preferences_card(ui);
                     });
             });
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonKind {
+    Secondary,
+    Danger,
+    Success,
+}
+
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
-        .fill(CARD)
+        .fill(SURFACE)
         .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(12))
+        .inner_margin(Margin::same(14))
         .stroke(Stroke::new(1.0, BORDER))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -1866,8 +2225,619 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-fn section_title(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(13.0).strong().color(ACCENT_HI));
+fn mask<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(INPUT_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(10))
+        .stroke(Stroke::new(1.0, BORDER_SOFT))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+fn section_header_left(ui: &mut egui::Ui, icon: Icon, title: &str, subtitle: &str) {
+    icon_badge(ui, icon, ACCENT_HI, ACCENT_SOFT);
+    ui.add_space(9.0);
+    ui.vertical(|ui| {
+        ui.label(RichText::new(title).size(13.5).strong().color(TEXT));
+        ui.label(RichText::new(subtitle).size(10.0).color(MUTED));
+    });
+}
+
+fn section_header(ui: &mut egui::Ui, icon: Icon, title: &str, subtitle: &str) {
+    ui.horizontal(|ui| section_header_left(ui, icon, title, subtitle));
+}
+
+fn icon_badge(ui: &mut egui::Ui, icon: Icon, fg: Color32, bg: Color32) {
+    icon_badge_sized(ui, icon, fg, bg, 28.0);
+}
+
+fn icon_badge_sized(ui: &mut egui::Ui, icon: Icon, fg: Color32, bg: Color32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let radius = CornerRadius::same((size * 0.28).round().clamp(0.0, 255.0) as u8);
+    ui.painter().rect_filled(rect, radius, bg);
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(size * 0.52)),
+        icon,
+        fg,
+    );
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str) -> egui::Response {
+    icon_button_sized(ui, icon, tooltip, 30.0)
+}
+
+fn icon_button_sized(ui: &mut egui::Ui, icon: Icon, tooltip: &str, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(7), SURFACE_HOVER);
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let color = if hovered { TEXT } else { MUTED };
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(size * 0.46)),
+        icon,
+        color,
+    );
+    response.on_hover_text(tooltip)
+}
+
+fn keycap(ui: &mut egui::Ui, key: &str) {
+    let font = FontId::monospace(9.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(key.to_string(), font, TEXT_SOFT);
+    let width = galley.size().x + 12.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(5),
+        SURFACE_ELEVATED,
+        Stroke::new(1.0, BORDER_HI),
+        StrokeKind::Middle,
+    );
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        TEXT_SOFT,
+    );
+}
+
+fn shortcut(ui: &mut egui::Ui, key: &str, label: &str) {
+    ui.horizontal(|ui| {
+        keycap(ui, key);
+        ui.add_space(5.0);
+        ui.label(RichText::new(label).size(10.0).color(MUTED));
+    });
+}
+
+fn pill(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32, border: Color32) {
+    let font = FontId::proportional(9.5);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, fg);
+    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 14.0, 20.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(10),
+        bg,
+        Stroke::new(1.0, border),
+        StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        fg,
+    );
+}
+
+fn status_pill(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
+    let font = FontId::proportional(9.0);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, fg);
+    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, 20.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(10),
+        bg,
+        Stroke::new(1.0, fg.gamma_multiply(0.35)),
+        StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        fg,
+    );
+}
+
+fn status_dot(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 5.0, color.gamma_multiply(0.14));
+    ui.painter().circle_filled(rect.center(), 2.8, color);
+}
+
+fn field_label(ui: &mut egui::Ui, icon: Option<Icon>, text: &str) {
+    ui.horizontal(|ui| {
+        if let Some(icon) = icon {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            icons::paint(ui.painter(), rect, icon, MUTED_DIM);
+            ui.add_space(5.0);
+        }
+        ui.label(RichText::new(text).size(10.5).color(MUTED));
+    });
+}
+
+fn segmented<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut T,
+    options: &[(T, Icon, &str)],
+) -> bool {
+    if options.is_empty() {
+        return false;
+    }
+
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(8),
+        INPUT_BG,
+        Stroke::new(1.0, BORDER_SOFT),
+        StrokeKind::Inside,
+    );
+
+    let inner = rect.shrink(3.0);
+    let seg_w = inner.width() / options.len() as f32;
+    let mut changed = false;
+
+    for (i, (option, icon, label)) in options.iter().enumerate() {
+        let seg = Rect::from_min_size(
+            pos2(inner.left() + seg_w * i as f32, inner.top()),
+            vec2(seg_w, inner.height()),
+        );
+        let response = ui.interact(seg, ui.scope_id().with((id, i)), Sense::click());
+
+        if response.clicked() && *value != *option {
+            *value = *option;
+            changed = true;
+        }
+
+        let selected = *value == *option;
+        let hovered = response.hovered();
+        if selected {
+            ui.painter().rect(
+                seg.shrink(1.0),
+                CornerRadius::same(6),
+                SURFACE_ACTIVE,
+                Stroke::new(1.0, BORDER_HI),
+                StrokeKind::Inside,
+            );
+        } else if hovered {
+            ui.painter()
+                .rect_filled(seg.shrink(1.0), CornerRadius::same(6), SURFACE_HOVER);
+        }
+
+        let fg = if selected {
+            TEXT
+        } else if hovered {
+            TEXT_SOFT
+        } else {
+            MUTED
+        };
+        let icon_color = if selected { ACCENT_HI } else { MUTED_DIM };
+        let font = FontId::proportional(11.5);
+        let galley = ui.painter().layout_no_wrap((*label).to_string(), font, fg);
+        let icon_w = 13.0;
+        let gap = 6.0;
+        let total = icon_w + gap + galley.size().x;
+        let start_x = seg.center().x - total / 2.0;
+
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(
+                pos2(start_x + icon_w / 2.0, seg.center().y),
+                Vec2::splat(13.0),
+            ),
+            *icon,
+            icon_color,
+        );
+        ui.painter().galley(
+            pos2(
+                start_x + icon_w + gap,
+                seg.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            fg,
+        );
+
+        if hovered {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+    }
+
+    changed
+}
+
+fn toggle_row(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    title: &str,
+    subtitle: &str,
+    value: &mut bool,
+) -> bool {
+    let height = if subtitle.is_empty() { 46.0 } else { 54.0 };
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+
+    let clicked = response.clicked();
+    if clicked {
+        *value = !*value;
+    }
+
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), SURFACE_HOVER);
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    let painter = ui.painter();
+    icons::paint(
+        painter,
+        Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(18.0)),
+        icon,
+        if *value { ACCENT_HI } else { MUTED },
+    );
+
+    let text_x = rect.left() + 38.0;
+    if subtitle.is_empty() {
+        painter.text(
+            pos2(text_x, rect.center().y),
+            Align2::LEFT_CENTER,
+            title,
+            FontId::proportional(12.5),
+            TEXT,
+        );
+    } else {
+        painter.text(
+            pos2(text_x, rect.center().y - 3.0),
+            Align2::LEFT_BOTTOM,
+            title,
+            FontId::proportional(12.5),
+            TEXT,
+        );
+        painter.text(
+            pos2(text_x, rect.center().y + 3.0),
+            Align2::LEFT_TOP,
+            subtitle,
+            FontId::proportional(10.5),
+            MUTED,
+        );
+    }
+
+    let switch =
+        Rect::from_center_size(pos2(rect.right() - 34.0, rect.center().y), vec2(40.0, 22.0));
+    paint_toggle(ui.ctx(), ui.painter(), response.id, switch, *value, hovered);
+
+    clicked
+}
+
+fn paint_toggle(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    id: egui::Id,
+    rect: Rect,
+    on: bool,
+    hovered: bool,
+) {
+    let t = ctx.animate_bool_with_time(id, on, 0.14);
+    let track = if on {
+        if hovered {
+            ACCENT_HI
+        } else {
+            ACCENT
+        }
+    } else if hovered {
+        Color32::from_rgb(63, 71, 88)
+    } else {
+        Color32::from_rgb(52, 59, 73)
+    };
+
+    painter.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), track);
+
+    let padding = 3.0;
+    let radius = rect.height() / 2.0 - padding;
+    let left = rect.left() + padding + radius;
+    let right = rect.right() - padding - radius;
+    let knob_x = left + (right - left) * t;
+
+    painter.circle_filled(
+        pos2(knob_x, rect.center().y + 1.0),
+        radius,
+        Color32::from_black_alpha(45),
+    );
+    painter.circle_filled(
+        pos2(knob_x, rect.center().y),
+        radius,
+        if on {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(220, 224, 232)
+        },
+    );
+}
+
+fn select_index(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: &str,
+    labels: &[String],
+    selected: &mut usize,
+) -> bool {
+    let before = *selected;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(RichText::new(current).size(11.5).color(TEXT))
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            if labels.is_empty() {
+                ui.label(
+                    RichText::new("No options available")
+                        .size(10.5)
+                        .color(MUTED),
+                );
+            }
+            for (index, label) in labels.iter().enumerate() {
+                ui.selectable_value(selected, index, label.as_str());
+            }
+        });
+    *selected != before
+}
+
+fn select_enum<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: &str,
+    options: &[(T, &str)],
+    value: &mut T,
+) -> bool {
+    let before = *value;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(RichText::new(current).size(11.5).color(TEXT))
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for (option, label) in options {
+                ui.selectable_value(value, *option, *label);
+            }
+        });
+    *value != before
+}
+
+fn number_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new(label).size(9.5).color(MUTED_DIM));
+        ui.add_sized(
+            vec2(66.0, 28.0),
+            egui::DragValue::new(value).range(range).speed(1.0),
+        );
+    });
+}
+
+fn button(ui: &mut egui::Ui, icon: Option<Icon>, label: &str, kind: ButtonKind) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(12.0), TEXT);
+    let icon_w = if icon.is_some() { 22.0 } else { 0.0 };
+    let width = galley.size().x + icon_w + 26.0;
+    button_sized(ui, icon, label, kind, width, 32.0)
+}
+
+fn button_sized(
+    ui: &mut egui::Ui,
+    icon: Option<Icon>,
+    label: &str,
+    kind: ButtonKind,
+    width: f32,
+    height: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    paint_button(
+        ui.painter(),
+        rect,
+        icon,
+        label,
+        kind,
+        true,
+        response.hovered(),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response
+}
+
+fn wide_button(
+    ui: &mut egui::Ui,
+    icon: Option<Icon>,
+    label: &str,
+    kind: ButtonKind,
+    height: f32,
+) -> egui::Response {
+    button_sized(ui, icon, label, kind, ui.available_width(), height)
+}
+
+fn paint_button(
+    painter: &egui::Painter,
+    rect: Rect,
+    icon: Option<Icon>,
+    label: &str,
+    kind: ButtonKind,
+    enabled: bool,
+    hovered: bool,
+) {
+    let (fill, stroke_color, fg) = match (kind, enabled, hovered) {
+        (ButtonKind::Danger, true, false) => (DANGER, DANGER, Color32::WHITE),
+        (ButtonKind::Danger, true, true) => (DANGER_HI, DANGER_HI, Color32::WHITE),
+        (ButtonKind::Success, true, false) => (SUCCESS, SUCCESS, Color32::from_rgb(8, 20, 11)),
+        (ButtonKind::Success, true, true) => (
+            Color32::from_rgb(82, 210, 100),
+            SUCCESS,
+            Color32::from_rgb(8, 20, 11),
+        ),
+        (ButtonKind::Secondary, true, false) => (SURFACE_ELEVATED, BORDER, TEXT),
+        (ButtonKind::Secondary, true, true) => (SURFACE_HOVER, BORDER_HI, TEXT),
+        (_, false, _) => (SURFACE_ELEVATED, BORDER_SOFT, MUTED_DIM),
+    };
+
+    painter.rect(
+        rect,
+        CornerRadius::same(8),
+        fill,
+        Stroke::new(1.0, stroke_color),
+        StrokeKind::Middle,
+    );
+
+    let galley = painter.layout_no_wrap(label.to_string(), FontId::proportional(12.0), fg);
+    let icon_w = if icon.is_some() { 22.0 } else { 0.0 };
+    let total = icon_w + galley.size().x;
+    let start_x = rect.center().x - total / 2.0;
+
+    if let Some(icon) = icon {
+        icons::paint(
+            painter,
+            Rect::from_center_size(pos2(start_x + 7.5, rect.center().y), Vec2::splat(15.0)),
+            icon,
+            fg,
+        );
+    }
+
+    painter.galley(
+        pos2(start_x + icon_w, rect.center().y - galley.size().y / 2.0),
+        galley,
+        fg,
+    );
+}
+
+fn record_button(ui: &mut egui::Ui, diameter: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    let center = rect.center();
+    let radius = diameter / 2.0;
+    let painter = ui.painter();
+    painter.circle_filled(center, radius, DANGER.gamma_multiply(0.12));
+    painter.circle_stroke(center, radius - 1.0, Stroke::new(1.0, DANGER_BORDER));
+    painter.circle_filled(
+        center,
+        radius * 0.56,
+        if hovered { DANGER_HI } else { DANGER },
+    );
+    painter.circle_stroke(
+        center,
+        radius * 0.56 + 1.5,
+        Stroke::new(1.0, Color32::from_white_alpha(25)),
+    );
+
+    response.on_hover_text("Start recording (F9)")
+}
+
+fn level_meter(ui: &mut egui::Ui, level: f32, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 7.0), Sense::hover());
+    let radius = CornerRadius::same(3);
+    ui.painter().rect_filled(rect, radius, INPUT_BG);
+
+    let fill = rect.width() * level.clamp(0.0, 1.0);
+    if fill > 0.5 {
+        let color = if level > 0.85 {
+            DANGER
+        } else if level > 0.6 {
+            CAUTION
+        } else {
+            SUCCESS
+        };
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.min, vec2(fill, rect.height())),
+            radius,
+            color,
+        );
+    }
+}
+
+fn stat(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new(label).size(9.0).color(MUTED_DIM));
+        ui.add_space(1.0);
+        ui.label(RichText::new(value).size(14.0).strong().color(TEXT));
+    });
+}
+
+fn detail_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+        icons::paint(ui.painter(), rect, icon, MUTED_DIM);
+        ui.add_space(4.0);
+        ui.label(RichText::new(label).size(10.5).color(MUTED_DIM));
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(value).size(10.5).color(TEXT_SOFT));
+        });
+    });
+    ui.add_space(4.0);
+}
+
+fn empty_state(ui: &mut egui::Ui, icon: Icon, title: &str, detail: &str) {
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), SURFACE_ELEVATED);
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(rect.center(), Vec2::splat(18.0)),
+            icon,
+            MUTED,
+        );
+        ui.add_space(8.0);
+        ui.label(RichText::new(title).size(12.0).strong().color(TEXT_SOFT));
+        ui.label(RichText::new(detail).size(10.5).color(MUTED_DIM));
+    });
+    ui.add_space(8.0);
+}
+
+fn open_path(path: &Path) {
+    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
+}
+
+fn reveal_path(path: &Path) {
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -1875,27 +2845,58 @@ fn setup_style(ctx: &egui::Context) {
 
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG;
-    visuals.window_fill = CARD;
+    visuals.window_fill = SURFACE;
+    visuals.window_stroke = Stroke::new(1.0, BORDER);
+    visuals.window_corner_radius = CornerRadius::same(12);
+    visuals.menu_corner_radius = CornerRadius::same(8);
     visuals.override_text_color = Some(TEXT);
-    visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    visuals.widgets.noninteractive.bg_fill = CARD;
+    visuals.selection.bg_fill = ACCENT_SOFT;
+    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    visuals.hyperlink_color = ACCENT_HI;
+    visuals.warn_fg_color = CAUTION;
+    visuals.error_fg_color = DANGER;
+    visuals.extreme_bg_color = INPUT_BG;
+    visuals.text_edit_bg_color = Some(INPUT_BG);
+    visuals.code_bg_color = SURFACE_ELEVATED;
+
+    visuals.widgets.noninteractive.bg_fill = SURFACE;
+    visuals.widgets.noninteractive.weak_bg_fill = SURFACE;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
-    visuals.widgets.inactive.bg_fill = CARD_HI;
-    visuals.widgets.inactive.weak_bg_fill = CARD_HI;
+
+    visuals.widgets.inactive.bg_fill = SURFACE_ELEVATED;
+    visuals.widgets.inactive.weak_bg_fill = SURFACE_ELEVATED;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 49, 64);
-    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(45, 49, 64);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+
+    visuals.widgets.hovered.bg_fill = SURFACE_HOVER;
+    visuals.widgets.hovered.weak_bg_fill = SURFACE_HOVER;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_HI);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
-    visuals.widgets.active.bg_fill = ACCENT;
+
+    visuals.widgets.active.bg_fill = SURFACE_ACTIVE;
+    visuals.widgets.active.weak_bg_fill = SURFACE_ACTIVE;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT);
     visuals.widgets.active.corner_radius = CornerRadius::same(8);
+
+    visuals.widgets.open.bg_fill = SURFACE_ELEVATED;
+    visuals.widgets.open.weak_bg_fill = SURFACE_ELEVATED;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, BORDER_HI);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0, TEXT);
+    visuals.widgets.open.corner_radius = CornerRadius::same(8);
+
     ctx.set_visuals(visuals);
 
     ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
         style.spacing.button_padding = Vec2::new(10.0, 6.0);
+        style.spacing.interact_size = Vec2::new(40.0, 30.0);
+        style.spacing.slider_width = 160.0;
+        style.spacing.combo_width = 160.0;
     });
 }
 
@@ -1907,6 +2908,11 @@ fn load_prefs() -> Prefs {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+fn load_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], WINDOW_ICON);
+    ctx.load_texture("screenrec_logo", image, egui::TextureOptions::LINEAR)
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -1940,8 +2946,8 @@ pub fn run() -> anyhow::Result<()> {
             .with_title("ScreenRec")
             .with_app_id("screen_rec")
             .with_icon(window_icon())
-            .with_inner_size([470.0, 710.0])
-            .with_min_inner_size([430.0, 600.0])
+            .with_inner_size([1120.0, 780.0])
+            .with_min_inner_size([960.0, 660.0])
             .with_resizable(true),
         ..Default::default()
     };

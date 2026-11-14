@@ -19,11 +19,11 @@ RES = os.path.join(ROOT, "resources")
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 SS = 4  # supersampling factor
 
-INDIGO_TOP = (110, 113, 255)
-INDIGO_BOTTOM = (66, 56, 202)
+INDIGO_TOP = (79, 124, 255)
+INDIGO_BOTTOM = (37, 66, 168)
 WHITE = (255, 255, 255)
-RED = (239, 68, 68)
-RED_DARK = (185, 28, 28)
+RED = (229, 72, 77)
+RED_DARK = (178, 38, 44)
 
 
 def smoothstep(edge0: float, edge1: float, x: float) -> float:
