@@ -15,6 +15,7 @@ pub enum Icon {
     Cursor,
     Camera,
     Timer,
+    Hourglass,
     Folder,
     Refresh,
     Record,
@@ -148,6 +149,25 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(12.0, 13.0), (15.0, 14.5)]);
             pen.line(&[(12.0, 3.0), (12.0, 5.5)]);
             pen.line(&[(9.0, 2.5), (15.0, 2.5)]);
+        }
+        Icon::Hourglass => {
+            pen.line(&[(6.0, 3.0), (18.0, 3.0)]);
+            pen.line(&[(6.0, 21.0), (18.0, 21.0)]);
+            pen.line(&[
+                (7.5, 3.0),
+                (7.5, 6.5),
+                (12.0, 12.0),
+                (7.5, 17.5),
+                (7.5, 21.0),
+            ]);
+            pen.line(&[
+                (16.5, 3.0),
+                (16.5, 6.5),
+                (12.0, 12.0),
+                (16.5, 17.5),
+                (16.5, 21.0),
+            ]);
+            pen.polygon(&[(9.5, 19.5), (14.5, 19.5), (12.0, 16.0)], pen.color);
         }
         Icon::Folder => {
             pen.polygon(

@@ -23,6 +23,10 @@ use crate::util;
 
 const HISTORY_PREVIEW: usize = 5;
 const RECORDING_BAR_TITLE: &str = "ScreenRec recording controls";
+/// Outer page margin and the gap between columns.
+pub(crate) const GUTTER: f32 = 16.0;
+/// Height shared by buttons, inputs and dropdowns that sit side by side.
+pub(crate) const CONTROL_H: f32 = 32.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetMode {
@@ -1208,7 +1212,7 @@ impl App {
         let p = pal();
         let frame = egui::Frame::new()
             .fill(p.panel_top)
-            .inner_margin(Margin::symmetric(20, 12))
+            .inner_margin(Margin::symmetric(GUTTER as i8, 12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(
@@ -1269,7 +1273,7 @@ impl App {
         let p = pal();
         let frame = egui::Frame::new()
             .fill(p.panel_top)
-            .inner_margin(Margin::symmetric(20, 7))
+            .inner_margin(Margin::symmetric(GUTTER as i8, 7))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let paused = self.recording.as_ref().is_some_and(|r| r.is_paused());
@@ -1396,8 +1400,8 @@ impl App {
                 ui.set_min_width(ui.available_width());
                 let height = 154.0;
                 let gap = 10.0;
-                let rec_w = 108.0;
-                let unit = ((ui.available_width() - rec_w - gap * 4.0) / 4.35).max(70.0);
+                let rec_w = 104.0;
+                let unit = ((ui.available_width() - rec_w - gap * 4.0) / 4.35).max(84.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     self.screen_tile(ui, vec2(unit * 1.35, height));
@@ -1450,26 +1454,58 @@ impl App {
                         self.system_audio = system;
                     }
 
-                    ui.allocate_ui_with_layout(
-                        vec2(rec_w, height),
-                        egui::Layout::top_down(Align::Center),
-                        |ui| {
-                            ui.add_space(14.0);
-                            if record_button(ui, 92.0, !blocked, shortcuts).clicked() {
-                                start = true;
-                            }
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("Start")
-                                    .size(13.5)
-                                    .family(theme::bold())
-                                    .color(if blocked { p.muted_dim } else { p.text }),
-                            );
-                            if shortcuts && !blocked {
-                                keycap(ui, "F9");
-                            }
-                        },
+                    // Rec column: button + "Start [F9]", centred on the tiles.
+                    let (column, _) = ui.allocate_exact_size(vec2(rec_w, height), Sense::hover());
+                    let diameter = 84.0;
+                    let caption_h = 22.0;
+                    let caption_gap = 12.0;
+                    let top = column.top() + (height - diameter - caption_gap - caption_h) / 2.0;
+                    let button_rect = Rect::from_center_size(
+                        pos2(column.center().x, top + diameter / 2.0),
+                        Vec2::splat(diameter),
                     );
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(button_rect));
+                    if record_button(&mut child, diameter, !blocked, shortcuts).clicked() {
+                        start = true;
+                    }
+                    let caption = Rect::from_min_size(
+                        pos2(column.left(), button_rect.bottom() + caption_gap),
+                        vec2(rec_w, caption_h),
+                    );
+                    let painter = ui.painter();
+                    let label = painter.layout_no_wrap(
+                        "Start".to_string(),
+                        FontId::new(13.5, theme::bold()),
+                        if blocked { p.muted_dim } else { p.text },
+                    );
+                    let show_key = shortcuts && !blocked;
+                    let key = painter.layout_no_wrap(
+                        "F9".to_string(),
+                        FontId::monospace(10.0),
+                        p.text_soft,
+                    );
+                    let key_w = key.size().x + 12.0;
+                    let total = label.size().x + if show_key { 8.0 + key_w } else { 0.0 };
+                    let x = caption.center().x - total / 2.0;
+                    painter.galley(
+                        pos2(x, caption.center().y - label.size().y / 2.0),
+                        label.clone(),
+                        p.text,
+                    );
+                    if show_key {
+                        let cap = Rect::from_min_size(
+                            pos2(x + label.size().x + 8.0, caption.center().y - 10.0),
+                            vec2(key_w, 20.0),
+                        );
+                        painter.rect(
+                            cap,
+                            CornerRadius::same(theme::RADIUS),
+                            p.surface_elevated,
+                            Stroke::new(1.0, p.border_hi),
+                            StrokeKind::Inside,
+                        );
+                        painter.galley(cap.center() - key.size() / 2.0, key, p.text_soft);
+                    }
                 });
             });
         if start {
@@ -1484,7 +1520,20 @@ impl App {
         let bar_h = 40.0;
         let top = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - bar_h));
         let bar = Rect::from_min_max(pos2(rect.min.x, rect.max.y - bar_h), rect.max);
-        painter.rect_filled(rect, CornerRadius::same(theme::RADIUS_PANEL), p.surface);
+        painter.rect(
+            rect,
+            CornerRadius::same(theme::RADIUS_PANEL),
+            p.surface,
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+        painter.line_segment(
+            [
+                pos2(rect.left() + 1.0, bar.top()),
+                pos2(rect.right() - 1.0, bar.top()),
+            ],
+            Stroke::new(1.0, p.border_soft),
+        );
         painter.rect_filled(
             top.shrink(6.0),
             CornerRadius::same(theme::RADIUS),
@@ -1573,7 +1622,7 @@ impl App {
 
         icons::paint(
             &painter,
-            Rect::from_center_size(pos2(bar.left() + 22.0, bar.center().y), Vec2::splat(18.0)),
+            Rect::from_center_size(pos2(bar.left() + 19.0, bar.center().y), Vec2::splat(18.0)),
             if self.mode == TargetMode::Window {
                 Icon::Window
             } else {
@@ -1601,10 +1650,10 @@ impl App {
             FontId::new(13.5, theme::bold()),
             p.text,
         );
-        job.wrap = egui::text::TextWrapping::truncate_at_width(bar.width() - 50.0);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(bar.width() - 46.0);
         let galley = painter.layout_job(job);
         painter.galley(
-            pos2(bar.left() + 40.0, bar.center().y - galley.size().y / 2.0),
+            pos2(bar.left() + 36.0, bar.center().y - galley.size().y / 2.0),
             galley,
             p.text,
         );
@@ -1977,7 +2026,7 @@ impl App {
             );
 
             ui.add_space(10.0);
-            field_label(ui, Some(Icon::Stop), "Stop automatically after");
+            field_label(ui, Some(Icon::Hourglass), "Stop automatically after");
             segmented(
                 ui,
                 "max_duration",
@@ -2389,6 +2438,9 @@ impl App {
                 (FolderKind::Recordings, "Recordings"),
                 (FolderKind::Screenshots, "Screenshots"),
             ] {
+                if kind == FolderKind::Screenshots {
+                    ui.add_space(4.0);
+                }
                 field_label(
                     ui,
                     Some(if kind == FolderKind::Recordings {
@@ -2425,7 +2477,6 @@ impl App {
                         open = Some(kind);
                     }
                 });
-                ui.add_space(4.0);
             }
 
             if let Some(kind) = browse {
@@ -2486,7 +2537,10 @@ impl App {
             let mut open: Option<(PathBuf, bool)> = None;
             let mut edit: Option<PathBuf> = None;
 
-            for entry in &entries {
+            for (row_index, entry) in entries.iter().enumerate() {
+                if row_index > 0 {
+                    ui.add_space(6.0);
+                }
                 let path = entry.path_buf();
                 let is_pending = self.pending_delete.as_deref() == Some(entry.path.as_str());
                 let screenshot = entry.kind == "screenshot";
@@ -2574,49 +2628,44 @@ impl App {
                             );
                             ui.add_space(4.0);
 
-                            let actions_w = 4.0 * 28.0 + 3.0 * ui.spacing().item_spacing.x;
+                            let actions = if screenshot { 3.0 } else { 4.0 };
+                            let actions_w = actions * 28.0 + (actions - 1.0) * 2.0;
                             let text_w = (ui.available_width() - actions_w - 8.0).max(60.0);
                             ui.allocate_ui_with_layout(
-                                    vec2(text_w, 32.0),
-                                    egui::Layout::top_down(Align::Min),
-                                    |ui| {
-                                        ui.spacing_mut().item_spacing.y = 1.0;
-                                        let title = format!(
-                                            "{} · {}",
-                                            if screenshot {
-                                                "Screenshot"
-                                            } else {
-                                                "Recording"
-                                            },
-                                            util::time_ago(entry.created)
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(title).size(12.5).color(p.text),
-                                            )
-                                            .truncate(),
-                                        );
-                                        let detail = if screenshot {
-                                            util::human_size(entry.size)
-                                        } else {
-                                            format!(
-                                                "{} · {}",
-                                                util::human_duration(
-                                                    entry.duration_secs.round() as u64
-                                                ),
-                                                util::human_size(entry.size)
-                                            )
-                                        };
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(detail).size(11.5).color(p.muted_dim),
-                                            )
-                                            .truncate(),
-                                        );
-                                    },
-                                );
+                                vec2(text_w, 32.0),
+                                egui::Layout::top_down(Align::Min),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    let title = if screenshot {
+                                        "Screenshot".to_string()
+                                    } else {
+                                        format!(
+                                            "Recording · {}",
+                                            util::human_duration(entry.duration_secs.round() as u64)
+                                        )
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(title).size(12.5).color(p.text),
+                                        )
+                                        .truncate(),
+                                    );
+                                    let detail = format!(
+                                        "{} · {}",
+                                        util::time_ago(entry.created),
+                                        util::human_size(entry.size)
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(detail).size(11.5).color(p.muted_dim),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                            );
 
                             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
                                 if icon_button_sized(ui, Icon::Trash, "Delete", 28.0).clicked() {
                                     request_delete = Some(entry.path.clone());
                                 }
@@ -2645,10 +2694,10 @@ impl App {
                 if !is_pending {
                     row.response.on_hover_text(entry.file_name());
                 }
-                ui.add_space(6.0);
             }
 
             if self.history.len() > HISTORY_PREVIEW {
+                ui.add_space(6.0);
                 let text = if self.show_all_history {
                     "Show fewer".to_string()
                 } else {
@@ -3300,19 +3349,28 @@ impl eframe::App for App {
 
         self.drive_preview(&ctx);
 
+        // Layout: GUTTER | settings | GUTTER | controls | GUTTER. Each column's
+        // right gutter also hosts its (floating) scrollbar.
+        let side_w = if ctx.content_rect().width() < 1100.0 {
+            340.0
+        } else {
+            372.0
+        };
         egui::Panel::right("control_panel")
-            .exact_size(372.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(p.bg)
-                    .inner_margin(Margin::symmetric(16, 16)),
-            )
+            .exact_size(side_w)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
+                left: 0,
+                right: 0,
+                top: GUTTER as i8,
+                bottom: GUTTER as i8,
+            }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("control_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width() - GUTTER);
                         self.setup_card(ui);
                         self.notifications(ui);
                         self.controls(ui);
@@ -3326,17 +3384,17 @@ impl eframe::App for App {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
-                left: 20,
-                right: 4,
-                top: 16,
-                bottom: 16,
+                left: GUTTER as i8,
+                right: 0,
+                top: GUTTER as i8,
+                bottom: GUTTER as i8,
             }))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("settings_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.set_max_width(ui.available_width() - 12.0);
+                        ui.set_max_width(ui.available_width() - GUTTER);
                         let locked = self.is_busy();
                         if locked {
                             info_note(
@@ -3561,7 +3619,7 @@ fn pill(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32, border: Color32
     let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 14.0, 22.0), Sense::hover());
     ui.painter().rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::RADIUS),
         bg,
         Stroke::new(1.0, border),
         StrokeKind::Inside,
@@ -3577,7 +3635,7 @@ pub(crate) fn status_pill(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color3
     let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, 20.0), Sense::hover());
     ui.painter().rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::RADIUS),
         bg,
         Stroke::new(1.0, fg.gamma_multiply(0.35)),
         StrokeKind::Inside,
@@ -3663,7 +3721,7 @@ pub(crate) fn segmented_sized<T: PartialEq + Copy>(
     let inner = rect.shrink(3.0);
     let seg_w = inner.width() / options.len() as f32;
     let enabled = ui.is_enabled();
-    let font = FontId::proportional(if size.y < 34.0 { 11.0 } else { 11.5 });
+    let font = FontId::proportional(if size.y < 34.0 { 12.0 } else { 12.5 });
 
     for (i, (option, icon, label)) in options.iter().enumerate() {
         let seg = Rect::from_min_size(
@@ -3686,16 +3744,16 @@ pub(crate) fn segmented_sized<T: PartialEq + Copy>(
         if selected {
             ui.painter().rect(
                 seg.shrink(1.0),
-                CornerRadius::same(4),
+                CornerRadius::same(3),
                 p.surface_active,
                 Stroke::new(1.0, p.border_hi),
                 StrokeKind::Inside,
             );
         } else if hovered {
             ui.painter()
-                .rect_filled(seg.shrink(1.0), CornerRadius::same(4), p.surface_hover);
+                .rect_filled(seg.shrink(1.0), CornerRadius::same(3), p.surface_hover);
         }
-        focus_ring(ui, &response, seg.shrink(1.0), 6);
+        focus_ring(ui, &response, seg.shrink(1.0), 3);
 
         let fg = if selected {
             p.text
@@ -3754,23 +3812,29 @@ pub(crate) fn toggle_row(
     }
 
     let hovered = response.hovered() && enabled;
+    // Content is flush with the card's other rows (icon at the left edge, switch
+    // at the right edge); only the hover highlight bleeds slightly outside.
+    let highlight = rect.expand2(vec2(6.0, 0.0));
     if hovered {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(4), p.surface_hover);
+        ui.painter().rect_filled(
+            highlight,
+            CornerRadius::same(theme::RADIUS),
+            p.surface_hover,
+        );
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
-    focus_ring(ui, &response, rect, 8);
+    focus_ring(ui, &response, highlight, theme::RADIUS);
 
     let painter = ui.painter();
     icons::paint(
         painter,
-        Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(20.0)),
+        Rect::from_center_size(pos2(rect.left() + 9.0, rect.center().y), Vec2::splat(18.0)),
         icon,
         if *value { p.accent_hi } else { p.text_soft },
     );
 
-    let text_x = rect.left() + 40.0;
-    let max_text = (rect.width() - 40.0 - 70.0).max(40.0);
+    let text_x = rect.left() + 30.0;
+    let max_text = (rect.width() - 30.0 - 56.0).max(40.0);
     let title_galley = painter.layout(
         title.to_string(),
         FontId::proportional(13.5),
@@ -3806,7 +3870,7 @@ pub(crate) fn toggle_row(
     }
 
     let switch =
-        Rect::from_center_size(pos2(rect.right() - 32.0, rect.center().y), vec2(40.0, 22.0));
+        Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(40.0, 22.0));
     paint_toggle(ui.ctx(), ui.painter(), response.id, switch, *value, hovered);
 
     if !subtitle.is_empty() {
@@ -3866,6 +3930,7 @@ fn select_index(
 ) -> bool {
     let p = pal();
     let before = *selected;
+    combo_metrics(ui);
     egui::ComboBox::from_id_salt(id)
         .selected_text(RichText::new(current).size(12.5).color(p.text))
         .width(ui.available_width())
@@ -3891,6 +3956,7 @@ pub(crate) fn select_enum<T: PartialEq + Copy>(
 ) -> bool {
     let p = pal();
     let before = *value;
+    combo_metrics(ui);
     egui::ComboBox::from_id_salt(id)
         .selected_text(RichText::new(current).size(12.5).color(p.text))
         .width(ui.available_width())
@@ -3901,6 +3967,14 @@ pub(crate) fn select_enum<T: PartialEq + Copy>(
             }
         });
     *value != before
+}
+
+/// Makes dropdowns exactly as tall as the buttons and inputs beside them.
+fn combo_metrics(ui: &mut egui::Ui) {
+    let text_h = ui.text_style_height(&egui::TextStyle::Button);
+    let spacing = ui.spacing_mut();
+    spacing.interact_size.y = CONTROL_H;
+    spacing.button_padding.y = ((CONTROL_H - text_h) / 2.0).max(4.0);
 }
 
 fn number_field(
@@ -3914,7 +3988,7 @@ fn number_field(
         ui.spacing_mut().item_spacing.y = 3.0;
         ui.label(RichText::new(label).size(11.5).color(p.muted_dim));
         ui.add_sized(
-            vec2(72.0, 28.0),
+            vec2(76.0, CONTROL_H),
             egui::DragValue::new(value)
                 .range(range)
                 .speed(1.0)
@@ -4370,7 +4444,7 @@ pub fn run(open: Vec<PathBuf>) -> anyhow::Result<()> {
             .with_app_id("screenrec")
             .with_icon(window_icon())
             .with_inner_size([1120.0, 780.0])
-            .with_min_inner_size([860.0, 560.0])
+            .with_min_inner_size([980.0, 640.0])
             .with_resizable(true),
         ..Default::default()
     };

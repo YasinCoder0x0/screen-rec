@@ -177,7 +177,7 @@ pub fn list_cameras() -> Vec<String> {
 pub fn ffmpeg_missing() -> crate::media::MissingDependency {
     crate::media::MissingDependency {
         title: "FFmpeg is required for editing".into(),
-        detail: "The editor uses FFmpeg to preview and export video. Install it with the command                  below (or from ffmpeg.org), then click Check again."
+        detail: "The editor uses FFmpeg to preview and export video. Install it with the command below (or from ffmpeg.org), then click Check again."
             .into(),
         install_command: Some("winget install --id Gyan.FFmpeg -e".into()),
     }

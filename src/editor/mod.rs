@@ -23,7 +23,7 @@ use self::player::{AudioPreview, FrameRequest, FrameWorker, VideoStream, PREVIEW
 use crate::gui::{
     button_sized, card, command_box, empty_state, field_label, file_name, icon_badge_sized,
     icon_button_sized, info_note, keycap, section_header, segmented, toggle_row, wide_button,
-    ButtonKind, HoverIf,
+    ButtonKind, HoverIf, CONTROL_H, GUTTER,
 };
 use crate::icons::{self, Icon};
 use crate::theme::pal;
@@ -816,39 +816,70 @@ impl Editor {
         self.handle_keys(&ctx);
         self.drive_playback(&ctx);
 
+        // Columns: GUTTER | media | GUTTER | viewer | GUTTER | properties | GUTTER.
+        // Every column starts with a CONTROL_H header row, so cards, stage and
+        // properties all begin on the same line.
+        let gutter = GUTTER as i8;
+        let half = (GUTTER / 2.0) as i8;
+        let narrow = ctx.content_rect().width() < 1200.0;
+        let (media_w, props_w) = if narrow {
+            (232.0, 264.0)
+        } else {
+            (256.0, 288.0)
+        };
+
         egui::Panel::bottom("editor_timeline")
             .exact_size(AUDIO_H + VIDEO_H + RULER_H + LANE_GAP * 2.0 + 68.0)
             .frame(
                 egui::Frame::new()
                     .fill(p.panel_top)
                     .stroke(Stroke::new(1.0, p.border_soft))
-                    .inner_margin(Margin::symmetric(12, 8)),
+                    .inner_margin(Margin::symmetric(gutter, 8)),
             )
             .show_separator_line(false)
             .show(root, |ui| self.timeline(ui));
 
         egui::Panel::left("editor_media")
-            .exact_size(256.0)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::same(12)))
+            .exact_size(media_w)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
+                left: gutter,
+                right: half,
+                top: 12,
+                bottom: 12,
+            }))
             .show_separator_line(false)
             .show(root, |ui| self.media_bin(ui));
 
         egui::Panel::right("editor_inspector")
-            .exact_size(276.0)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::same(12)))
+            .exact_size(props_w)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
+                left: half,
+                right: 0,
+                top: 12,
+                bottom: 12,
+            }))
             .show_separator_line(false)
             .show(root, |ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width() - GUTTER, CONTROL_H),
+                    egui::Layout::left_to_right(Align::Center),
+                    |ui| panel_title(ui, "Properties"),
+                );
+                ui.add_space(8.0);
                 egui::ScrollArea::vertical()
                     .id_salt("inspector_scroll")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.inspector(ui));
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width() - GUTTER);
+                        self.inspector(ui);
+                    });
             });
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(p.bg)
-                    .inner_margin(Margin::symmetric(4, 12)),
+                    .inner_margin(Margin::symmetric(half, 12)),
             )
             .show(root, |ui| self.viewer(ui));
 
@@ -862,52 +893,61 @@ impl Editor {
             ui.set_max_width(520.0);
             ui.add_space(30.0);
             card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    icon_badge_sized(ui, Icon::Edit, p.accent_hi, p.accent_soft, 40.0);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("Set up the editor")
-                                .size(16.0)
-                                .family(crate::theme::bold())
-                                .color(p.text),
-                        );
-                        ui.label(
-                            RichText::new("One quick install and you can edit any recording.")
-                                .size(12.0)
-                                .color(p.muted),
-                        );
+                ui.with_layout(egui::Layout::top_down(Align::Min), |ui| {
+                    ui.horizontal(|ui| {
+                        icon_badge_sized(ui, Icon::Edit, p.accent_hi, p.accent_soft, 40.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("Set up the editor")
+                                    .size(16.0)
+                                    .family(crate::theme::bold())
+                                    .color(p.text),
+                            );
+                            ui.label(
+                                RichText::new("One quick install and you can edit any recording.")
+                                    .size(12.0)
+                                    .color(p.muted),
+                            );
+                        });
                     });
-                });
-                ui.add_space(12.0);
-                let missing = crate::backend::ffmpeg_missing();
-                ui.label(RichText::new(&missing.detail).size(12.0).color(p.text_soft));
-                if let Some(command) = &missing.install_command {
-                    ui.add_space(8.0);
-                    command_box(ui, command);
-                }
-                ui.add_space(12.0);
-                if wide_button(
-                    ui,
-                    Some(Icon::Refresh),
-                    "Check again",
-                    ButtonKind::Primary,
-                    36.0,
-                )
-                .clicked()
-                {
-                    self.tools_ok =
-                        crate::tools::ffmpeg().is_some() && crate::tools::ffprobe().is_some();
-                    self.audio_preview = AudioPreview::available();
-                    if !self.tools_ok {
-                        self.notice = Some(
-                            "FFmpeg still wasn't found. You may need to restart ScreenRec.".into(),
-                        );
+                    ui.add_space(12.0);
+                    let missing = crate::backend::ffmpeg_missing();
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&missing.detail).size(12.5).color(p.text_soft),
+                        )
+                        .halign(Align::Min)
+                        .wrap(),
+                    );
+                    if let Some(command) = &missing.install_command {
+                        ui.add_space(8.0);
+                        command_box(ui, command);
                     }
-                }
-                if let Some(notice) = &self.notice {
-                    ui.add_space(6.0);
-                    info_note(ui, Icon::Info, notice, p.caution);
-                }
+                    ui.add_space(12.0);
+                    if wide_button(
+                        ui,
+                        Some(Icon::Refresh),
+                        "Check again",
+                        ButtonKind::Primary,
+                        36.0,
+                    )
+                    .clicked()
+                    {
+                        self.tools_ok =
+                            crate::tools::ffmpeg().is_some() && crate::tools::ffprobe().is_some();
+                        self.audio_preview = AudioPreview::available();
+                        if !self.tools_ok {
+                            self.notice = Some(
+                                "FFmpeg still wasn't found. You may need to restart ScreenRec."
+                                    .into(),
+                            );
+                        }
+                    }
+                    if let Some(notice) = &self.notice {
+                        ui.add_space(6.0);
+                        info_note(ui, Icon::Info, notice, p.caution);
+                    }
+                });
             });
         });
     }
@@ -915,29 +955,28 @@ impl Editor {
     fn media_bin(&mut self, ui: &mut egui::Ui) {
         let p = pal();
         let ctx = ui.ctx().clone();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Media")
-                    .size(14.5)
-                    .family(crate::theme::bold())
-                    .color(p.text),
-            );
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                if button_sized(
-                    ui,
-                    Some(Icon::Import),
-                    "Import",
-                    ButtonKind::Primary,
-                    96.0,
-                    30.0,
-                )
-                .on_hover_text("Import video files")
-                .clicked()
-                {
-                    self.import_dialog(&ctx);
-                }
-            });
-        });
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), CONTROL_H),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                panel_title(ui, "Media");
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if button_sized(
+                        ui,
+                        Some(Icon::Import),
+                        "Import",
+                        ButtonKind::Primary,
+                        96.0,
+                        CONTROL_H,
+                    )
+                    .on_hover_text("Import video files")
+                    .clicked()
+                    {
+                        self.import_dialog(&ctx);
+                    }
+                });
+            },
+        );
         ui.add_space(8.0);
 
         if self.sources.is_empty() {
@@ -1068,55 +1107,59 @@ impl Editor {
         let total = self.total();
 
         // Toolbar
-        ui.horizontal(|ui| {
-            let ctx = ui.ctx().clone();
-            if icon_button_sized(ui, Icon::Folder, "Open project (Ctrl+O)", 32.0).clicked() {
-                self.open_project_dialog(&ctx);
-            }
-            ui.add_enabled_ui(!self.clips.is_empty(), |ui| {
-                if icon_button_sized(ui, Icon::Save, "Save project (Ctrl+S)", 32.0).clicked() {
-                    self.save_project(false);
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), CONTROL_H),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                let ctx = ui.ctx().clone();
+                if icon_button_sized(ui, Icon::Folder, "Open project (Ctrl+O)", 32.0).clicked() {
+                    self.open_project_dialog(&ctx);
                 }
-            });
-            ui.add_space(4.0);
-            let title = format!(
-                "{}{}",
-                self.project_name(),
-                if self.dirty && !self.clips.is_empty() {
-                    "*"
-                } else {
-                    ""
-                }
-            );
-            ui.add(
-                egui::Label::new(
-                    RichText::new(title)
-                        .size(14.5)
-                        .family(crate::theme::bold())
-                        .color(p.text),
-                )
-                .truncate(),
-            );
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                let enabled = !self.clips.is_empty() && !self.is_exporting();
-                ui.add_enabled_ui(enabled, |ui| {
-                    if button_sized(
-                        ui,
-                        Some(Icon::Export),
-                        "Export",
-                        ButtonKind::Primary,
-                        104.0,
-                        32.0,
-                    )
-                    .on_hover_text("Render the timeline to an MP4 file")
-                    .clicked()
-                    {
-                        self.stop();
-                        self.export = ExportState::Settings;
+                ui.add_enabled_ui(!self.clips.is_empty(), |ui| {
+                    if icon_button_sized(ui, Icon::Save, "Save project (Ctrl+S)", 32.0).clicked() {
+                        self.save_project(false);
                     }
                 });
-            });
-        });
+                ui.add_space(4.0);
+                let title = format!(
+                    "{}{}",
+                    self.project_name(),
+                    if self.dirty && !self.clips.is_empty() {
+                        "*"
+                    } else {
+                        ""
+                    }
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(title)
+                            .size(14.5)
+                            .family(crate::theme::bold())
+                            .color(p.text),
+                    )
+                    .truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    let enabled = !self.clips.is_empty() && !self.is_exporting();
+                    ui.add_enabled_ui(enabled, |ui| {
+                        if button_sized(
+                            ui,
+                            Some(Icon::Export),
+                            "Export",
+                            ButtonKind::Primary,
+                            104.0,
+                            32.0,
+                        )
+                        .on_hover_text("Render the timeline to an MP4 file")
+                        .clicked()
+                        {
+                            self.stop();
+                            self.export = ExportState::Settings;
+                        }
+                    });
+                });
+            },
+        );
         ui.add_space(8.0);
 
         // Stage
@@ -1196,37 +1239,66 @@ impl Editor {
 
         // Transport
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.set_height(40.0);
-            let enabled = !self.clips.is_empty();
-            ui.add_enabled_ui(enabled, |ui| {
-                ui.label(
-                    RichText::new(format!("{} / {}", fmt_time(self.playhead, true), fmt_time(total, true)))
-                        .font(FontId::monospace(12.0))
-                        .color(p.text_soft),
-                );
-                let controls_w = 5.0 * 36.0 + 4.0 * ui.spacing().item_spacing.x + 8.0;
-                let offset = (ui.available_width() - controls_w) / 2.0 - 120.0;
-                ui.add_space(offset.max(8.0));
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+        let enabled = !self.clips.is_empty();
+        let time_text = format!(
+            "{} / {}",
+            fmt_time(self.playhead, true),
+            fmt_time(total, true)
+        );
+        let time_font = FontId::monospace(12.0);
+        let time_w = ui
+            .painter()
+            .layout_no_wrap(time_text.clone(), time_font.clone(), p.text_soft)
+            .size()
+            .x;
+        ui.painter().text(
+            pos2(row.left() + 2.0, row.center().y),
+            Align2::LEFT_CENTER,
+            time_text,
+            time_font,
+            if enabled { p.text_soft } else { p.muted_dim },
+        );
 
-                if icon_button_sized(ui, Icon::SkipStart, "Go to start (Home)", 34.0).clicked() {
-                    self.seek(0.0);
-                }
-                if icon_button_sized(ui, Icon::StepBack, "Previous frame (←)", 34.0).clicked() {
-                    self.seek(self.playhead - 1.0 / PREVIEW_FPS);
-                }
-                let playing = self.playing.is_some();
-                if play_button(ui, playing).clicked() {
-                    self.toggle_play();
-                }
-                if icon_button_sized(ui, Icon::StepForward, "Next frame (→)", 34.0).clicked() {
-                    self.seek(self.playhead + 1.0 / PREVIEW_FPS);
-                }
-                if icon_button_sized(ui, Icon::SkipEnd, "Go to end (End)", 34.0).clicked() {
-                    self.seek(total);
-                }
+        // Playback controls sit exactly under the centre of the stage; if the
+        // stage is too narrow, they move right of the time readout instead.
+        let gap = 4.0;
+        let controls_w = 4.0 * 34.0 + 40.0 + 4.0 * gap;
+        let centered = row.center().x - controls_w / 2.0;
+        let left = centered.max(row.left() + time_w + 12.0);
+        let controls = Rect::from_min_size(pos2(left, row.top()), vec2(controls_w, row.height()));
+        let mut transport = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(controls)
+                .layout(egui::Layout::left_to_right(Align::Center)),
+        );
+        transport.spacing_mut().item_spacing.x = gap;
+        transport.add_enabled_ui(enabled, |ui| {
+            if icon_button_sized(ui, Icon::SkipStart, "Go to start (Home)", 34.0).clicked() {
+                self.seek(0.0);
+            }
+            if icon_button_sized(ui, Icon::StepBack, "Previous frame (←)", 34.0).clicked() {
+                self.seek(self.playhead - 1.0 / PREVIEW_FPS);
+            }
+            let playing = self.playing.is_some();
+            if play_button(ui, playing).clicked() {
+                self.toggle_play();
+            }
+            if icon_button_sized(ui, Icon::StepForward, "Next frame (→)", 34.0).clicked() {
+                self.seek(self.playhead + 1.0 / PREVIEW_FPS);
+            }
+            if icon_button_sized(ui, Icon::SkipEnd, "Go to end (End)", 34.0).clicked() {
+                self.seek(total);
+            }
+        });
 
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+        let mute_rect = Rect::from_min_max(pos2(row.right() - 34.0, row.top()), row.max);
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(mute_rect)
+                .layout(egui::Layout::right_to_left(Align::Center)),
+        );
+        right.add_enabled_ui(enabled, |ui| {
                     let (icon, tip) = if self.preview_muted {
                         (Icon::Mute, "Unmute preview")
                     } else {
@@ -1245,8 +1317,6 @@ impl Editor {
                         icons::paint(ui.painter(), rect.shrink(9.0), Icon::Mute, p.muted_dim);
                         resp.on_hover_text("Audio preview needs ffplay (included with most FFmpeg installs). Exports still include audio.");
                     }
-                });
-            });
         });
     }
 
@@ -1273,29 +1343,35 @@ impl Editor {
                 ui.add_space(8.0);
 
                 field_label(ui, Some(Icon::Timer), "Trim (seconds in source)");
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("In").size(12.0).color(p.muted));
-                    ui.add(
-                        egui::DragValue::new(&mut clip.start)
-                            .range(0.0..=(clip.end - MIN_CLIP))
-                            .speed(0.05)
-                            .fixed_decimals(2)
-                            .suffix(" s"),
-                    );
-                    ui.label(RichText::new("Out").size(12.0).color(p.muted));
-                    ui.add(
-                        egui::DragValue::new(&mut clip.end)
-                            .range((clip.start + MIN_CLIP)..=duration)
-                            .speed(0.05)
-                            .fixed_decimals(2)
-                            .suffix(" s"),
-                    );
+                let (start_max, end_min) = (clip.end - MIN_CLIP, clip.start + MIN_CLIP);
+                ui.columns(2, |columns| {
+                    for (column, (label, value, range)) in columns.iter_mut().zip([
+                        ("In", &mut clip.start, 0.0..=start_max),
+                        ("Out", &mut clip.end, end_min..=duration),
+                    ]) {
+                        column.spacing_mut().item_spacing.y = 3.0;
+                        column.label(RichText::new(label).size(11.5).color(p.muted_dim));
+                        column.add_sized(
+                            vec2(column.available_width(), CONTROL_H),
+                            egui::DragValue::new(value)
+                                .range(range)
+                                .speed(0.05)
+                                .fixed_decimals(2)
+                                .suffix(" s"),
+                        );
+                    }
                 });
-                ui.label(
-                    RichText::new(format!("Length {}", fmt_time(clip.len(), true)))
-                        .size(12.0)
-                        .color(p.muted),
-                );
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Length").size(12.0).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(fmt_time(clip.len(), true))
+                                .size(12.0)
+                                .color(p.text),
+                        );
+                    });
+                });
 
                 ui.add_space(10.0);
                 field_label(ui, Some(Icon::Speaker), "Volume");
@@ -1592,7 +1668,7 @@ impl Editor {
             );
             if major {
                 painter.text(
-                    pos2(x + 4.0, ruler.top() + 2.0),
+                    pos2(x + 6.0, ruler.top() + 2.0),
                     Align2::LEFT_TOP,
                     fmt_time(t, step < 1.0),
                     FontId::proportional(11.5),
@@ -2304,6 +2380,16 @@ fn drop_zone(ui: &mut egui::Ui) {
         Icon::Record,
         "Or record something",
         "Finished recordings can be opened here from Recent.",
+    );
+}
+
+/// Column heading shared by Media and Properties.
+fn panel_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(14.5)
+            .family(crate::theme::bold())
+            .color(pal().text),
     );
 }
 
