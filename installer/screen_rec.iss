@@ -3,7 +3,9 @@
 ; or simply run package.bat from the project root.
 
 #define MyAppName "ScreenRec"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.2.0"
+#endif
 #define MyAppPublisher "ScreenRec"
 #define MyAppExeName "ScreenRec.exe"
 #define MyAppId "{{bdf74f61-8b1b-456c-a862-5932c89714e0}"
@@ -31,7 +33,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 CloseApplications=yes
 RestartApplications=no
-VersionInfoVersion=0.1.0.0
+VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoProductName={#MyAppName}

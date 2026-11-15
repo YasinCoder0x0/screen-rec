@@ -6,14 +6,15 @@ use std::time::Instant;
 use parking_lot::Mutex;
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{
-    AudioSettingsBuilder, ContainerSettingsBuilder, ImageFormat, VideoEncoder, VideoSettingsBuilder,
-    VideoSettingsSubType,
+    AudioSettingsBuilder, ContainerSettingsBuilder, ImageFormat, VideoEncoder,
+    VideoSettingsBuilder, VideoSettingsSubType,
 };
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 
-use crate::recorder::{BoxError, Codec, Region, SharedEncoder, SharedError};
-use crate::webcam::{self, WebcamStream};
+use super::webcam::{self, WebcamStream};
+use super::{BoxError, SharedEncoder, SharedError};
+use crate::media::{Codec, Region};
 
 #[derive(Clone)]
 pub struct CaptureFlags {
@@ -191,20 +192,11 @@ impl CaptureHandler {
         let mut raw = Vec::new();
         let source = frame_buffer.as_nopadding_buffer(&mut raw);
         let needed = stride * height as usize;
-        let mut data = source
-            .get(..needed)
-            .unwrap_or(source)
-            .to_vec();
+        let mut data = source.get(..needed).unwrap_or(source).to_vec();
 
         if let Some(camera) = &self.webcam {
             if let Some(camera_frame) = camera.latest_frame() {
-                webcam::composite(
-                    &mut data,
-                    width,
-                    height,
-                    &camera_frame,
-                    &camera.overlay(),
-                );
+                webcam::composite(&mut data, width, height, &camera_frame, &camera.overlay());
             }
         }
 

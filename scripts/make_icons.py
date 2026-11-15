@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates the ScreenRec application icon (ICO + raw RGBA for egui).
+"""Generates the ScreenRec application icon (ICO, PNGs and raw RGBA for egui).
 
 The script only uses the Python standard library so it can be re-run on any
 machine without extra tooling. Run it from the project root:
@@ -19,11 +19,11 @@ RES = os.path.join(ROOT, "resources")
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 SS = 4  # supersampling factor
 
-INDIGO_TOP = (79, 124, 255)
-INDIGO_BOTTOM = (37, 66, 168)
+PRIMARY = (72, 75, 255)        # #484BFF
+PRIMARY_DEEP = (43, 38, 196)   # bottom-right of the gradient
 WHITE = (255, 255, 255)
-RED = (229, 72, 77)
-RED_DARK = (178, 38, 44)
+CORAL = (255, 84, 112)
+CORAL_DEEP = (226, 46, 86)
 
 
 def smoothstep(edge0: float, edge1: float, x: float) -> float:
@@ -38,60 +38,68 @@ def lerp(a: float, b: float, t: float) -> float:
 
 
 def mix(c1, c2, t: float):
-    return tuple(lerp(c1[i], c2[i], t) for i in range(3))
+    return tuple(lerp(a, b, t) for a, b in zip(c1, c2))
 
 
-def rounded_rect_coverage(px: float, py: float, size: float) -> float:
-    margin = size * 0.035
-    radius = size * 0.225
-    cx = cy = size * 0.5
-    hw = hh = size * 0.5 - margin
-    dx = abs(px - cx) - (hw - radius)
-    dy = abs(py - cy) - (hh - radius)
-    outside = math.hypot(max(dx, 0.0), max(dy, 0.0))
-    inside = min(max(dx, dy), 0.0)
-    dist = outside + inside - radius
-    return 1.0 - smoothstep(-0.5, 0.5, dist)
+def squircle_inside(px: float, py: float, size: float) -> bool:
+    """Superellipse |x|^5 + |y|^5 <= 1 with a small margin."""
+    half = size * 0.5 * 0.94
+    nx = abs(px - size * 0.5) / half
+    ny = abs(py - size * 0.5) / half
+    return nx ** 5 + ny ** 5 <= 1.0
 
 
-def render_hires(size: int):
-    """Returns a list of straight-alpha RGBA tuples at size*SS resolution."""
-    hi = size * SS
-    cx = cy = hi * 0.5
-    ring_outer = hi * 0.30
-    ring_inner = hi * 0.30 - max(1.0, hi * 0.055)
-    dot_radius = hi * 0.155
+def seg_dist(px, py, ax, ay, bx, by):
+    vx, vy = bx - ax, by - ay
+    t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy)))
+    return math.hypot(px - (ax + vx * t), py - (ay + vy * t))
+
+
+def bracket_segments(size: float):
+    lo, hi, arm = 0.25 * size, 0.75 * size, 0.15 * size
+    segs = []
+    for cx, dx in ((lo, 1), (hi, -1)):
+        for cy, dy in ((lo, 1), (hi, -1)):
+            segs.append((cx, cy, cx + dx * arm, cy))
+            segs.append((cx, cy, cx, cy + dy * arm))
+    return segs
+
+
+def render_hires(size: int, ss: int = SS):
+    """Returns a list of straight-alpha RGBA tuples at size*ss resolution."""
+    hi = size * ss
+    c = hi * 0.5
+    # Thicker strokes at tiny sizes keep the mark legible in the taskbar.
+    stroke = hi * (0.075 if size <= 24 else 0.062)
+    segs = bracket_segments(hi)
+    ring_outer = hi * 0.168
+    ring_inner = ring_outer - hi * (0.05 if size <= 24 else 0.04)
+    dot = hi * (0.13 if size <= 24 else 0.105)
 
     pixels = []
     for y in range(hi):
         for x in range(hi):
-            px = x + 0.5
-            py = y + 0.5
-
-            bg = rounded_rect_coverage(px, py, hi)
-            if bg <= 0.0:
+            px, py = x + 0.5, y + 0.5
+            if not squircle_inside(px, py, hi):
                 pixels.append((0, 0, 0, 0))
                 continue
 
-            ny = py / hi
-            base = mix(INDIGO_TOP, INDIGO_BOTTOM, ny)
+            t = (px + py) / (2.0 * hi)
+            col = mix(PRIMARY, PRIMARY_DEEP, smoothstep(0.15, 1.0, t))
+            # Soft top highlight.
+            glow = max(0.0, 1.0 - math.hypot(px / hi - 0.3, py / hi - 0.15) * 2.2)
+            col = mix(col, WHITE, glow * 0.12)
 
-            # Soft diagonal sheen in the upper-left corner.
-            sheen = max(0.0, 1.0 - math.hypot(px / hi, py / hi) * 1.6)
-            base = mix(base, (255, 255, 255), sheen * 0.10)
-
-            col = base
-            d = math.hypot(px - cx, py - cy)
-
-            # Record button: white ring with a red centre.
-            if ring_inner <= d <= ring_outer:
+            if any(seg_dist(px, py, *s) <= stroke * 0.5 for s in segs):
                 col = WHITE
-            if d <= dot_radius:
-                dot_t = max(0.0, min(1.0, d / max(dot_radius, 1.0)))
-                col = mix(RED, RED_DARK, dot_t * 0.55)
+            d = math.hypot(px - c, py - c)
+            if size > 24 and ring_inner <= d <= ring_outer:
+                col = WHITE
+            if d <= dot:
+                col = mix(CORAL, CORAL_DEEP, d / dot * 0.6)
 
             r, g, b = (int(round(v)) for v in col)
-            pixels.append((r, g, b, int(round(bg * 255))))
+            pixels.append((r, g, b, 255))
     return pixels, hi
 
 
@@ -196,8 +204,8 @@ def write_raw_rgba(path: str, size: int):
             fh.write(bytes((r, g, b, a)))
 
 
-def write_png(path: str, size: int):
-    pixels, hi = render_hires(size)
+def write_png(path: str, size: int, ss: int = SS):
+    pixels, hi = render_hires(size, ss)
     rgba = downsample(pixels, hi, size)
     raw = bytearray()
     for y in range(size):
@@ -226,7 +234,8 @@ def main():
     build_ico(os.path.join(RES, "ScreenRec.ico"))
     write_raw_rgba(os.path.join(RES, "icon_256.rgba"), 256)
     write_png(os.path.join(RES, "icon_256.png"), 256)
-    print("Generated resources/ScreenRec.ico, icon_256.rgba, icon_256.png")
+    write_png(os.path.join(RES, "icon_1024.png"), 1024, ss=1)
+    print("Generated resources/ScreenRec.ico, icon_256.rgba, icon_256.png, icon_1024.png")
 
 
 if __name__ == "__main__":

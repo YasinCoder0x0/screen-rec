@@ -9,79 +9,18 @@ use anyhow::{anyhow, bail, Result};
 use parking_lot::Mutex;
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample, IMFSourceReader,
-    MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL, MFCreateAttributes, MFCreateMediaType,
-    MFCreateSourceReaderFromMediaSource, MFStartup, MFVideoFormat_RGB32,
-    MFVideoInterlace_Progressive, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+    MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromMediaSource,
+    MFEnumDeviceSources, MFMediaType_Video, MFStartup, MFVideoFormat_RGB32,
+    MFVideoInterlace_Progressive, MFSTARTUP_FULL, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
+    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED, CoUninitialize};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Corner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
-impl Corner {
-    pub const ALL: [Corner; 4] = [
-        Corner::TopLeft,
-        Corner::TopRight,
-        Corner::BottomLeft,
-        Corner::BottomRight,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Corner::TopLeft => "Top left",
-            Corner::TopRight => "Top right",
-            Corner::BottomLeft => "Bottom left",
-            Corner::BottomRight => "Bottom right",
-        }
-    }
-
-    pub fn from_index(index: u8) -> Corner {
-        match index {
-            1 => Corner::TopRight,
-            2 => Corner::BottomLeft,
-            3 => Corner::BottomRight,
-            _ => Corner::TopLeft,
-        }
-    }
-
-    pub fn index(self) -> u8 {
-        match self {
-            Corner::TopLeft => 0,
-            Corner::TopRight => 1,
-            Corner::BottomLeft => 2,
-            Corner::BottomRight => 3,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct WebcamOptions {
-    pub device_index: usize,
-    pub size_pct: u8,
-    pub corner: Corner,
-    pub mirror: bool,
-}
-
-impl Default for WebcamOptions {
-    fn default() -> Self {
-        Self {
-            device_index: 0,
-            size_pct: 22,
-            corner: Corner::BottomRight,
-            mirror: true,
-        }
-    }
-}
+use crate::media::{Corner, WebcamOptions};
 
 #[derive(Clone, Copy, Debug)]
 pub struct WebcamOverlay {
@@ -182,17 +121,10 @@ pub fn enumerate_devices() -> Vec<String> {
                 if let Some(device) = device {
                     let mut buffer = [0u16; 512];
                     if device
-                        .GetString(
-                            &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                            &mut buffer,
-                            None,
-                        )
+                        .GetString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut buffer, None)
                         .is_ok()
                     {
-                        let end = buffer
-                            .iter()
-                            .position(|&c| c == 0)
-                            .unwrap_or(buffer.len());
+                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
                         let name = String::from_utf16_lossy(&buffer[..end]);
                         names.push(if name.trim().is_empty() {
                             format!("Camera {}", names.len() + 1)
@@ -306,27 +238,20 @@ fn run_inner(
         let mut reader_attributes: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut reader_attributes, 2)?;
         if let Some(reader_attributes) = &reader_attributes {
-            let _ = reader_attributes.SetUINT32(
-                &MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-                1,
-            );
+            let _ =
+                reader_attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1);
             let _ = reader_attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1);
         }
 
-        let reader: IMFSourceReader = MFCreateSourceReaderFromMediaSource(
-            &source,
-            reader_attributes.as_ref(),
-        )?;
+        let reader: IMFSourceReader =
+            MFCreateSourceReaderFromMediaSource(&source, reader_attributes.as_ref())?;
 
         let stream_index = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
         let media_type: IMFMediaType = MFCreateMediaType()?;
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
-        media_type.SetUINT32(
-            &MF_MT_INTERLACE_MODE,
-            MFVideoInterlace_Progressive.0 as u32,
-        )?;
+        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         media_type.SetUINT64(&MF_MT_FRAME_SIZE, packed(1280, 720))?;
         media_type.SetUINT64(&MF_MT_FRAME_RATE, packed(30, 1))?;
         reader.SetCurrentMediaType(stream_index, None, &media_type)?;
@@ -538,7 +463,7 @@ fn draw_rounded_border(
     height: u32,
     radius: f32,
 ) {
-    let color = [0xF1, 0x66, 0x63, 0xFF]; // accent (BGRA)
+    let color = [0xFF, 0x4B, 0x48, 0xFF]; // #484BFF primary (BGRA)
     let thickness = 2u32;
     let stride = base_width as usize * 4;
 

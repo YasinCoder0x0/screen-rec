@@ -1,15 +1,15 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use wasapi::{
-    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
-    initialize_mta,
+    initialize_mta, AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, SampleType,
+    StreamMode, WaveFormat,
 };
 
-use crate::recorder::{SharedEncoder, SharedError};
+use super::{SharedEncoder, SharedError};
 
 /// The audio format we ask WASAPI to convert to. It matches the encoder settings.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -60,7 +60,17 @@ pub fn start(
         .name("screenrec-audio".to_string())
         .spawn({
             let stop = stop.clone();
-            move || run(encoder, error, system_audio, microphone, stop, paused, audio_level)
+            move || {
+                run(
+                    encoder,
+                    error,
+                    system_audio,
+                    microphone,
+                    stop,
+                    paused,
+                    audio_level,
+                )
+            }
         })
         .ok();
 
@@ -137,7 +147,8 @@ fn run(
         let target_frames = (effective_elapsed.as_secs_f64() * SAMPLE_RATE as f64) as u64;
 
         if total_samples_sent < target_frames {
-            let frames_needed = ((target_frames - total_samples_sent) as usize).min(MAX_FRAMES_PER_TICK);
+            let frames_needed =
+                ((target_frames - total_samples_sent) as usize).min(MAX_FRAMES_PER_TICK);
 
             if frames_needed > 0 {
                 let available = sources
@@ -218,7 +229,14 @@ fn open_source(loopback: bool) -> anyhow::Result<Source> {
         .get_iaudioclient()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let format = WaveFormat::new(16, 16, SampleType::Int, SAMPLE_RATE as usize, CHANNELS, None);
+    let format = WaveFormat::new(
+        16,
+        16,
+        SampleType::Int,
+        SAMPLE_RATE as usize,
+        CHANNELS,
+        None,
+    );
 
     let (default_period, _min_period) = client
         .get_device_period()

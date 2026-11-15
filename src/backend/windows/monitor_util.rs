@@ -12,25 +12,8 @@ pub struct MonitorBounds {
     pub device_name: String,
     pub x: i32,
     pub y: i32,
-    pub width: u32,
-    pub height: u32,
     pub scale: f32,
-}
-
-impl MonitorBounds {
-    pub fn logical_position(&self) -> (f32, f32) {
-        (
-            self.x as f32 / self.scale,
-            self.y as f32 / self.scale,
-        )
-    }
-
-    pub fn logical_size(&self) -> (f32, f32) {
-        (
-            self.width as f32 / self.scale,
-            self.height as f32 / self.scale,
-        )
-    }
+    pub primary: bool,
 }
 
 extern "system" fn enum_monitor(
@@ -73,9 +56,8 @@ extern "system" fn enum_monitor(
         device_name,
         x: rc.left,
         y: rc.top,
-        width: (rc.right - rc.left).max(0) as u32,
-        height: (rc.bottom - rc.top).max(0) as u32,
         scale,
+        primary: info.monitorInfo.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
     });
 
     TRUE
@@ -92,13 +74,4 @@ pub fn enumerate() -> Vec<MonitorBounds> {
         );
     }
     list
-}
-
-pub fn find(device_name: &str) -> Option<MonitorBounds> {
-    let monitors = enumerate();
-    monitors
-        .iter()
-        .find(|m| m.device_name.eq_ignore_ascii_case(device_name))
-        .cloned()
-        .or_else(|| monitors.into_iter().next())
 }

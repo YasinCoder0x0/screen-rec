@@ -1,23 +1,23 @@
-mod audio;
-mod capture;
+mod backend;
+mod editor;
 mod gui;
 mod history;
 mod hotkey;
 mod icons;
-mod monitor_util;
-mod recorder;
+mod media;
+mod shell;
+mod theme;
+mod tools;
 mod util;
-mod webcam;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
-use recorder::{CaptureTarget, Codec, RecordingOptions, Region};
-use windows_capture::monitor::Monitor;
-use windows_capture::window::Window;
+use anyhow::{anyhow, Result};
+use media::{CaptureTarget, Codec, RecordingOptions, Region};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const APP_NAME: &str = "ScreenRec";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Default)]
 struct Args {
@@ -35,14 +35,16 @@ struct Args {
     hevc: bool,
     help: bool,
     version: bool,
+    list: bool,
+    edit: Vec<PathBuf>,
 }
 
 fn print_help() {
     println!(
-        r#"ScreenRec {VERSION} - Fast, native, high-quality Windows screen recorder
+        r#"ScreenRec {VERSION} - Fast, high-quality screen recorder for Windows, macOS and Linux
 
 USAGE:
-    ScreenRec.exe [OPTIONS]
+    screenrec [OPTIONS]
 
 Running without options opens the graphical interface.
 
@@ -52,13 +54,16 @@ OPTIONS:
     --out <PATH>               Custom output file path (.mp4)
     --fps <N>                  Frames per second (24, 30, 60, 120; default: 60)
     --bitrate <BPS>            Video bitrate in bits per second (default: adaptive)
-    --monitor <INDEX>          Monitor index (1-based; default: 1)
+    --monitor <INDEX>          Monitor index (1-based; default: primary)
     --window <TITLE>           Capture the window containing this title substring
+                               (on Wayland a system dialog asks which window)
     --region <X,Y,W,H>         Capture only this rectangle of the target
     --no-audio                 Disable system audio recording
     --mic                      Enable microphone recording
     --no-cursor                Do not capture the mouse cursor
     --hevc                     Encode with HEVC / H.265 instead of H.264
+    --list                     List displays, windows and cameras, then exit
+    --edit <FILE>              Open a video in the editor (a bare video path works too)
     -V, --version              Print the version and exit
     -h, --help                 Print this help information
 
@@ -95,6 +100,8 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
             "-V" | "--version" => args.version = true,
+            "--list" => args.list = true,
+            "--edit" => args.edit.extend(iter.next().map(PathBuf::from)),
             "--headless" | "record" => args.headless = true,
             "--seconds" => args.seconds = iter.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--out" => args.out = iter.next().map(PathBuf::from),
@@ -107,7 +114,13 @@ fn parse_args() -> Args {
             "--mic" => args.mic = true,
             "--no-cursor" => args.no_cursor = true,
             "--hevc" => args.hevc = true,
-            _ => {}
+            other
+                if editor::is_video(std::path::Path::new(other))
+                    || editor::is_project(std::path::Path::new(other)) =>
+            {
+                args.edit.push(PathBuf::from(other))
+            }
+            other => eprintln!("warning: ignoring unknown argument {other:?} (see --help)"),
         }
     }
 
@@ -142,6 +155,11 @@ fn main() {
     if args.version {
         attach_console();
         println!("ScreenRec {VERSION}");
+        return;
+    }
+    if args.list {
+        attach_console();
+        print_sources();
         return;
     }
 
@@ -183,7 +201,7 @@ fn attach_console() {}
 #[cfg(windows)]
 fn hide_own_console() {
     use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
-    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
     unsafe {
         let hwnd = GetConsoleWindow();
         if hwnd.0.is_null() {
@@ -201,10 +219,10 @@ fn hide_own_console() {}
 
 #[cfg(windows)]
 fn show_error_dialog(message: &str) {
-    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
     let text = HSTRING::from(message);
-    let caption = HSTRING::from("ScreenRec - Startup error");
+    let caption = HSTRING::from("ScreenRec - Error");
     unsafe {
         MessageBoxW(None, &text, &caption, MB_OK | MB_ICONERROR);
     }
@@ -212,31 +230,105 @@ fn show_error_dialog(message: &str) {
 
 #[cfg(not(windows))]
 fn show_error_dialog(message: &str) {
-    eprintln!("{message}");
+    let _ = rfd::MessageDialog::new()
+        .set_title("ScreenRec - Error")
+        .set_description(message)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
+}
+
+fn print_sources() {
+    let caps = backend::capabilities();
+    println!(
+        "Platform: {}  ·  Encoder: {}",
+        caps.platform, caps.encoder_label
+    );
+    for missing in &caps.missing {
+        println!("! {}: {}", missing.title, missing.detail);
+        if let Some(command) = &missing.install_command {
+            println!("    {command}");
+        }
+    }
+    println!(
+        "
+Displays:"
+    );
+    for display in backend::list_displays() {
+        println!("  {}  {}", display.index + 1, display.label());
+    }
+    if caps.portal_source {
+        println!("  (chosen in the system screen-sharing dialog)");
+    }
+    println!(
+        "
+Windows:"
+    );
+    for window in backend::list_windows() {
+        println!("  {}", window.label());
+    }
+    println!(
+        "
+Cameras:"
+    );
+    for (index, camera) in backend::list_cameras().iter().enumerate() {
+        println!("  {}  {camera}", index + 1);
+    }
 }
 
 fn run(args: Args) -> Result<()> {
-    recorder::set_dpi_awareness();
+    backend::set_dpi_awareness();
 
     if args.wants_headless() {
         run_headless(&args)
     } else {
-        gui::run()
+        gui::run(args.edit)
     }
 }
 
 fn build_target(args: &Args) -> Result<CaptureTarget> {
-    if let Some(title) = &args.window {
-        let window = Window::from_contains_name(title)
-            .with_context(|| format!("no window title contains \"{title}\""))?;
-        return Ok(CaptureTarget::Window(window));
+    let caps = backend::capabilities();
+    if let Some(missing) = caps.missing.first() {
+        let hint = missing
+            .install_command
+            .as_deref()
+            .map(|command| {
+                format!(
+                    "
+  {command}"
+                )
+            })
+            .unwrap_or_default();
+        return Err(anyhow!("{}: {}{hint}", missing.title, missing.detail));
     }
 
-    let index = args.monitor.unwrap_or(1);
-    let monitor = Monitor::from_index(index)
-        .or_else(|_| Monitor::from_index(1))
-        .context("no monitor available")?;
-    Ok(CaptureTarget::Monitor(monitor))
+    if caps.portal_source {
+        return Ok(CaptureTarget::Portal {
+            window: args.window.is_some(),
+        });
+    }
+
+    if let Some(title) = &args.window {
+        let needle = title.to_lowercase();
+        return backend::list_windows()
+            .into_iter()
+            .find(|w| w.title.to_lowercase().contains(&needle))
+            .map(CaptureTarget::Window)
+            .ok_or_else(|| anyhow!("no window title contains \"{title}\" (see --list)"));
+    }
+
+    let displays = backend::list_displays();
+    let display = match args.monitor {
+        Some(index) => displays
+            .iter()
+            .find(|d| d.index + 1 == index)
+            .ok_or_else(|| anyhow!("there is no monitor {index} (see --list)"))?,
+        None => displays
+            .iter()
+            .find(|d| d.primary)
+            .or_else(|| displays.first())
+            .ok_or_else(|| anyhow!("no monitor available"))?,
+    };
+    Ok(CaptureTarget::Display(display.clone()))
 }
 
 fn run_headless(args: &Args) -> Result<()> {
@@ -269,9 +361,12 @@ fn run_headless(args: &Args) -> Result<()> {
         options.output.display()
     );
 
-    let recording = recorder::start(options)?;
+    let recording = backend::start(options)?;
     if args.seconds > 0 {
-        println!("Recording started. Stopping automatically in {}s...", args.seconds);
+        println!(
+            "Recording started. Stopping automatically in {}s...",
+            args.seconds
+        );
     } else {
         println!("Recording started. Press Enter to stop...");
     }
@@ -289,9 +384,13 @@ fn run_headless(args: &Args) -> Result<()> {
         });
     }
 
+    let mut last_warning: Option<String> = None;
     loop {
         if let Some(err) = recording.error() {
-            eprintln!("warning: {err}");
+            if last_warning.as_ref() != Some(&err) {
+                eprintln!("warning: {err}");
+                last_warning = Some(err);
+            }
         }
 
         if !recording.is_capture_alive() {

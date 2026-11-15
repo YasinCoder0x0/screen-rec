@@ -2,25 +2,82 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
+    #[cfg(windows)]
+    let primary = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let primary = std::env::var_os("HOME");
+    primary
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Reads an XDG user directory (`XDG_VIDEOS_DIR`, ...) from
+/// `~/.config/user-dirs.dirs`.
+#[cfg(target_os = "linux")]
+fn xdg_user_dir(key: &str) -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".config"));
+    let text = std::fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
+    let home = home_dir();
+    text.lines().find_map(|line| {
+        let value = line
+            .trim()
+            .strip_prefix(key)?
+            .trim_start()
+            .strip_prefix('=')?;
+        let value = value.trim().trim_matches('"');
+        let path = match value.strip_prefix("$HOME") {
+            Some(rest) => home.join(rest.trim_start_matches('/')),
+            None => PathBuf::from(value),
+        };
+        (path != home).then_some(path)
+    })
+}
+
 pub fn recordings_dir() -> PathBuf {
-    home_dir().join("Videos").join("ScreenRec")
+    #[cfg(target_os = "macos")]
+    let base = home_dir().join("Movies");
+    #[cfg(target_os = "linux")]
+    let base = xdg_user_dir("XDG_VIDEOS_DIR").unwrap_or_else(|| home_dir().join("Videos"));
+    #[cfg(windows)]
+    let base = home_dir().join("Videos");
+    base.join("ScreenRec")
 }
 
 pub fn screenshots_dir() -> PathBuf {
-    home_dir().join("Pictures").join("ScreenRec")
+    #[cfg(target_os = "linux")]
+    let base = xdg_user_dir("XDG_PICTURES_DIR").unwrap_or_else(|| home_dir().join("Pictures"));
+    #[cfg(not(target_os = "linux"))]
+    let base = home_dir().join("Pictures");
+    base.join("ScreenRec")
 }
 
 pub fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|p| p.join("ScreenRec"))
-        .or_else(|| Some(home_dir().join(".config").join("screen_rec")))
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(|p| PathBuf::from(p).join("ScreenRec"))
+            .or_else(|| Some(home_dir().join("AppData").join("Roaming").join("ScreenRec")))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            home_dir()
+                .join("Library")
+                .join("Application Support")
+                .join("ScreenRec"),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home_dir().join(".config"));
+        Some(base.join("screenrec"))
+    }
 }
 
 pub fn unix_now() -> i64 {
@@ -38,63 +95,54 @@ pub fn timestamped_path(dir: &Path, ext: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn local_parts() -> (u16, u16, u16, u16, u16, u16, u16) {
+fn local_parts() -> (u32, u32, u32, u32, u32, u32, u32) {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let now = unsafe { GetLocalTime() };
     (
-        now.wYear,
-        now.wMonth,
-        now.wDay,
-        now.wHour,
-        now.wMinute,
-        now.wSecond,
-        now.wMilliseconds,
+        now.wYear as u32,
+        now.wMonth as u32,
+        now.wDay as u32,
+        now.wHour as u32,
+        now.wMinute as u32,
+        now.wSecond as u32,
+        now.wMilliseconds as u32,
     )
 }
 
-#[cfg(not(windows))]
-fn local_parts() -> (i64, u32, u32, u32, u32, u32, u32) {
-    let millis = SystemTime::now()
+#[cfg(unix)]
+fn local_parts() -> (u32, u32, u32, u32, u32, u32, u32) {
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let secs = millis.div_euclid(1000);
-    let ms = millis.rem_euclid(1000) as u32;
-    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
-    let rem = secs.rem_euclid(86_400);
+        .unwrap_or_default();
+    let secs = now.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&secs, &mut tm);
+    }
     (
-        y,
-        m,
-        d,
-        (rem / 3600) as u32,
-        ((rem % 3600) / 60) as u32,
-        (rem % 60) as u32,
-        ms,
+        (tm.tm_year + 1900) as u32,
+        (tm.tm_mon + 1) as u32,
+        tm.tm_mday as u32,
+        tm.tm_hour as u32,
+        tm.tm_min as u32,
+        tm.tm_sec as u32,
+        now.subsec_millis(),
     )
 }
 
-#[cfg(not(windows))]
-#[allow(dead_code)]
-pub fn format_timestamp(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    format!("{y:04}-{m:02}-{d:02}_{hh:02}-{mm:02}-{ss:02}")
-}
-
-#[cfg(not(windows))]
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+pub fn time_ago(timestamp: i64) -> String {
+    if timestamp <= 0 {
+        return String::new();
+    }
+    let delta = (unix_now() - timestamp).max(0);
+    match delta {
+        0..=44 => "just now".to_string(),
+        45..=3_599 => format!("{} min ago", (delta / 60).max(1)),
+        3_600..=86_399 => format!("{} h ago", delta / 3_600),
+        86_400..=172_799 => "yesterday".to_string(),
+        _ => format!("{} days ago", delta / 86_400),
+    }
 }
 
 pub fn human_duration(secs: u64) -> String {
@@ -119,5 +167,15 @@ pub fn human_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// "12.4 Mbps"
+pub fn human_bitrate(bits_per_second: u64) -> String {
+    let mbps = bits_per_second as f64 / 1_000_000.0;
+    if mbps >= 10.0 {
+        format!("{mbps:.0} Mbps")
+    } else {
+        format!("{mbps:.1} Mbps")
     }
 }

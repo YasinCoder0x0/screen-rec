@@ -1,8 +1,8 @@
 1 ICON "resources\\ScreenRec.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -14,12 +14,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "ScreenRec"
-            VALUE "FileDescription", "ScreenRec - Fast native screen recorder"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileDescription", "ScreenRec - Fast screen recorder"
+            VALUE "FileVersion", "0.2.0"
             VALUE "InternalName", "screen_rec"
             VALUE "OriginalFilename", "ScreenRec.exe"
             VALUE "ProductName", "ScreenRec"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.2.0"
             VALUE "LegalCopyright", "Copyright (c) 2026 ScreenRec"
         END
     END
